@@ -1,24 +1,36 @@
 import { useState } from "react";
 
-function Login({ checkingSession, handleLogin, handleLogout, user }) {
+function Login({ checkingSession, handleLogin, handleLogout, handleRegister, user }) {
+  const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  async function submitLogin(event) {
+  async function submitForm(event) {
     event.preventDefault();
     setMessage("");
     setSubmitting(true);
 
-    const result = await handleLogin(username, password);
+    const result = mode === "login"
+      ? await handleLogin(username, password)
+      : await handleRegister(username, password, confirmPassword);
 
     setSubmitting(false);
     setMessage(result.message);
 
     if (result.ok) {
       setPassword("");
+      setConfirmPassword("");
     }
+  }
+
+  function switchMode(nextMode) {
+    setMode(nextMode);
+    setPassword("");
+    setConfirmPassword("");
+    setMessage("");
   }
 
   return (
@@ -33,23 +45,27 @@ function Login({ checkingSession, handleLogin, handleLogout, user }) {
           <p className="tagline">Head-to-head typing races with real stakes.</p>
         </section>
 
-        <section className="login-card" aria-labelledby="login-title">
+        <section className="login-card" aria-labelledby="auth-title">
           {checkingSession ? (
             <p className="session-status" role="status">Checking session...</p>
           ) : user ? (
             <div className="signed-in">
               <p className="status-kicker">Signed in</p>
-              <h2 id="login-title">{user.username}</h2>
+              <h2 id="auth-title">{user.username}</h2>
               <button className="secondary-button" type="button" onClick={handleLogout}>
                 Sign out
               </button>
             </div>
           ) : (
             <>
-              <p className="status-kicker">Welcome back</p>
-              <h2 id="login-title">Sign in</h2>
+              <p className="status-kicker">
+                {mode === "login" ? "Welcome back" : "New challenger"}
+              </p>
+              <h2 id="auth-title">
+                {mode === "login" ? "Sign in" : "Create account"}
+              </h2>
 
-              <form onSubmit={submitLogin}>
+              <form onSubmit={submitForm}>
                 <label htmlFor="username">Username</label>
                 <input
                   id="username"
@@ -66,19 +82,47 @@ function Login({ checkingSession, handleLogin, handleLogout, user }) {
                   id="password"
                   name="password"
                   type="password"
-                  autoComplete="current-password"
+                  autoComplete={mode === "login" ? "current-password" : "new-password"}
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                 />
 
+                {mode === "register" && (
+                  <>
+                    <label htmlFor="confirm-password">Confirm password</label>
+                    <input
+                      id="confirm-password"
+                      name="confirm-password"
+                      type="password"
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(event) => setConfirmPassword(event.target.value)}
+                    />
+                  </>
+                )}
+
                 <button className="login-button" type="submit" disabled={submitting}>
-                  {submitting ? "Signing in..." : "Enter the race floor"}
+                  {submitting
+                    ? mode === "login" ? "Signing in..." : "Creating account..."
+                    : mode === "login" ? "Enter the race floor" : "Join the race floor"}
                 </button>
 
                 <p className="form-message" role="status" aria-live="polite">
                   {message}
                 </p>
               </form>
+
+              <div className="auth-switch">
+                <span>
+                  {mode === "login" ? "Need an account?" : "Already have an account?"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => switchMode(mode === "login" ? "register" : "login")}
+                >
+                  {mode === "login" ? "Register" : "Sign in"}
+                </button>
+              </div>
             </>
           )}
         </section>

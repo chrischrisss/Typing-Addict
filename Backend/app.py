@@ -45,6 +45,34 @@ with app.app_context():
         db.session.commit()
 
 
+@app.post("/register")
+def register():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", ""))
+
+    if len(username) < 3 or len(username) > 30:
+        return jsonify({"message": "Username must be 3 to 30 characters."}), 400
+
+    if len(password) < 8:
+        return jsonify({"message": "Password must be at least 8 characters."}), 400
+
+    if User.query.filter_by(username=username).first():
+        return jsonify({"message": "That username is already taken."}), 409
+
+    user = User(
+        username=username,
+        password_hash=generate_password_hash(password),
+    )
+    db.session.add(user)
+    db.session.commit()
+
+    token = create_access_token(identity=str(user.id))
+    response = jsonify({"message": "Account created."})
+    set_access_cookies(response, token)
+    return response, 201
+
+
 @app.post("/login")
 def login():
     data = request.get_json(silent=True) or {}

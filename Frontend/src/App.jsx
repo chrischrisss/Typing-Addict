@@ -70,6 +70,44 @@ function App() {
     }
   }
 
+  async function handleRegister(username, password, confirmPassword) {
+    if (!username.trim() || !password || !confirmPassword) {
+      return { ok: false, message: "Fill out every field." };
+    }
+
+    if (password !== confirmPassword) {
+      return { ok: false, message: "Passwords do not match." };
+    }
+
+    try {
+      const response = await fetch("/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ username: username.trim(), password }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        return { ok: false, message: data.message || "Registration failed." };
+      }
+
+      const userResponse = await fetch("/me", {
+        credentials: "include",
+      });
+
+      if (!userResponse.ok) {
+        return { ok: false, message: "Your account was created, but the session failed." };
+      }
+
+      setUser(await userResponse.json());
+      return { ok: true, message: "" };
+    } catch {
+      return { ok: false, message: "Could not connect to the server." };
+    }
+  }
+
   async function handleLogout() {
     try {
       await fetch("/logout", {
@@ -86,6 +124,7 @@ function App() {
       checkingSession={checkingSession}
       handleLogin={handleLogin}
       handleLogout={handleLogout}
+      handleRegister={handleRegister}
       user={user}
     />
   );

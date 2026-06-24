@@ -178,6 +178,29 @@ button {
   text-align: center;
 }
 
+.auth-switch {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  color: #656964;
+  font-size: 0.9rem;
+}
+
+.auth-switch button {
+  padding: 0;
+  color: #161816;
+  background: none;
+  border: 0;
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.auth-switch button:hover {
+  color: #568000;
+}
+
 .session-status,
 .signed-in {
   display: flex;

@@ -1,6 +1,6 @@
 # Typing Addict
 
-Login-only starter for the type-racing app.
+Login and registration starter for the type-racing app.
 
 ## Run
 
@@ -20,4 +20,4 @@ npm install
 npm run dev
 ```
 
-Open the Vite URL and sign in with `admin` / `password`.
+Open the Vite URL to register, or sign in with `admin` / `password`.
