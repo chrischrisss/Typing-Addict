@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import Login from "./pages/Login";
+import Lobby from "./pages/Lobby";
 import "./App.css";
 
 function App() {
@@ -117,6 +118,10 @@ function App() {
     } finally {
       setUser(null);
     }
+  }
+
+  if (user && user.username !== "admin") {
+    return <Lobby handleLogout={handleLogout} user={user.user ?? user} />;
   }
 
   return (
