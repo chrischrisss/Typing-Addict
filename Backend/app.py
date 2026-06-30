@@ -1,5 +1,6 @@
 import os
 import random
+import warnings
 from datetime import UTC, datetime, timedelta
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -34,6 +35,49 @@ def is_render():
     return os.environ.get("RENDER") == "true"
 
 
+def resolve_database_url():
+    database_url = os.environ.get("DATABASE_URL", "sqlite:///db.sqlite3")
+    if not database_url.startswith("sqlite:"):
+        return database_url
+
+    if database_url.startswith("sqlite:////"):
+        db_path = "/" + database_url.removeprefix("sqlite:////")
+    elif database_url.startswith("sqlite:///"):
+        db_path = database_url.removeprefix("sqlite:///")
+    else:
+        return database_url
+
+    db_path = os.path.abspath(db_path)
+    db_dir = os.path.dirname(db_path)
+    if not db_dir:
+        return database_url
+
+    try:
+        os.makedirs(db_dir, exist_ok=True)
+    except OSError:
+        if is_render():
+            fallback = "sqlite:///db.sqlite3"
+            warnings.warn(
+                f"Could not create database directory {db_dir}; falling back to {fallback}. "
+                "Attach a Render persistent disk mounted at /data to keep SQLite data across deploys.",
+                stacklevel=2,
+            )
+            return fallback
+        raise
+
+    if not os.access(db_dir, os.W_OK):
+        if is_render():
+            fallback = "sqlite:///db.sqlite3"
+            warnings.warn(
+                f"Database directory {db_dir} is not writable; falling back to {fallback}.",
+                stacklevel=2,
+            )
+            return fallback
+        raise PermissionError(f"Database directory is not writable: {db_dir}")
+
+    return database_url
+
+
 def socket_cors_origins():
     render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
     if render_url:
@@ -53,7 +97,7 @@ if is_render():
 else:
     CORS(app, supports_credentials=True)
 
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///db.sqlite3")
+app.config["SQLALCHEMY_DATABASE_URI"] = resolve_database_url()
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["JWT_SECRET_KEY"] = os.environ.get(
     "JWT_SECRET_KEY",
