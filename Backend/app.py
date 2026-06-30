@@ -7,11 +7,13 @@ from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager,
     create_access_token,
+    decode_token,
     get_jwt_identity,
     jwt_required,
     set_access_cookies,
     unset_jwt_cookies,
 )
+from flask_socketio import SocketIO, emit, join_room
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from games import calc_score, calc_wpm, check_progress, pick_prompt, score_clicking, score_spacebar
@@ -44,6 +46,17 @@ app.config["JWT_COOKIE_CSRF_PROTECT"] = False
 
 db.init_app(app)
 JWTManager(app)
+
+SOCKET_CORS_ORIGINS = os.environ.get(
+    "SOCKET_CORS_ORIGINS",
+    "http://127.0.0.1:5173,http://localhost:5173",
+).split(",")
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins=SOCKET_CORS_ORIGINS,
+    manage_session=False,
+)
 
 
 with app.app_context():
@@ -362,6 +375,101 @@ def lobby_payload(lobby, role=None, include_members=False):
     return payload
 
 
+def lobby_room(code):
+    return f"lobby:{code}"
+
+
+def broadcast_lobby(lobby):
+    socketio.emit(
+        "lobby:updated",
+        lobby_payload(lobby, include_members=True),
+        room=lobby_room(lobby.code),
+    )
+
+
+def broadcast_game(lobby, session=None):
+    payload = game_payload(lobby, session)
+    if payload:
+        socketio.emit("game:state", payload, room=lobby_room(lobby.code))
+
+
+def broadcast_lobby_closed(code, message="Lobby closed."):
+    socketio.emit(
+        "lobby:closed",
+        {"code": code, "message": message},
+        room=lobby_room(code),
+    )
+
+
+def membership_role(lobby, user_id):
+    role = lobby_membership(lobby.id, user_id)
+    if role == "player" and lobby.host_user_id == user_id:
+        return "host"
+    return role
+
+
+@socketio.on("connect")
+def handle_connect():
+    token = request.cookies.get("access_token_cookie")
+    if not token:
+        return False
+
+    try:
+        user_id = int(decode_token(token)["sub"])
+    except Exception:
+        return False
+
+    code = str(request.args.get("lobby", "")).strip().upper()
+    lobby = find_lobby(code)
+    if not lobby or not membership_role(lobby, user_id):
+        return False
+
+    join_room(lobby_room(lobby.code))
+    emit("lobby:updated", lobby_payload(lobby, include_members=True))
+    game = game_payload(lobby)
+    if game:
+        emit("game:state", game)
+    return True
+
+
+def tick_active_games():
+    controls = GameControl.query.filter(
+        GameControl.phase.in_(["countdown", "running"])
+    ).all()
+    for control in controls:
+        session = db.session.get(GameSession, control.game_session_id)
+        if not session:
+            continue
+        lobby = db.session.get(Lobby, session.lobby_id)
+        if not lobby:
+            continue
+        sync_game_control(lobby, session, control)
+        broadcast_game(lobby, session)
+
+
+def game_tick_loop():
+    while True:
+        socketio.sleep(0.5)
+        with app.app_context():
+            if app.config.get("TESTING"):
+                continue
+            try:
+                tick_active_games()
+            finally:
+                db.session.remove()
+
+
+_tick_loop_started = False
+
+
+def start_game_tick_loop():
+    global _tick_loop_started
+    if _tick_loop_started or app.config.get("TESTING"):
+        return
+    _tick_loop_started = True
+    socketio.start_background_task(game_tick_loop)
+
+
 @app.post("/lobbies")
 @jwt_required()
 def create_lobby():
@@ -486,6 +594,7 @@ def join_lobby(code):
         response_role = "viewer"
 
     db.session.commit()
+    broadcast_lobby(lobby)
 
     return jsonify(lobby_payload(lobby, response_role, include_members=True))
 
@@ -540,11 +649,14 @@ def leave_lobby(code):
     has_players = Player.query.filter_by(lobby_id=lobby.id).count() > 0
     has_viewers = Viewer.query.filter_by(lobby_id=lobby.id).count() > 0
     if not has_players and not has_viewers:
+        lobby_code = lobby.code
         delete_lobby_data(lobby)
         db.session.commit()
+        broadcast_lobby_closed(lobby_code)
         return jsonify({"message": "Left lobby.", "lobby_closed": True})
 
     db.session.commit()
+    broadcast_lobby(lobby)
     return jsonify({
         "message": "Left lobby.",
         "lobby_closed": False,
@@ -571,6 +683,7 @@ def kick_player(code, target_user_id):
 
     db.session.delete(player)
     db.session.commit()
+    broadcast_lobby(lobby)
     return jsonify({"message": "Player kicked."})
 
 
@@ -603,6 +716,8 @@ def start_lobby_game(code):
         round_started_at=session.started_at,
     ))
     db.session.commit()
+    broadcast_lobby(lobby)
+    broadcast_game(lobby, session)
     return jsonify(game_payload(lobby, session)), 201
 
 
@@ -634,6 +749,7 @@ def start_next_round(code):
         control.round_started_at = utc_now() + timedelta(seconds=START_COUNTDOWN_DURATION)
 
     db.session.commit()
+    broadcast_game(lobby, session)
     return jsonify(game_payload(lobby, session))
 
 
@@ -748,8 +864,10 @@ def submit_game_result(code):
     ):
         control.phase = "leaderboard"
     db.session.commit()
+    broadcast_game(lobby, session)
     return jsonify({"score": score, "metric": metric, "accuracy": accuracy}), 201
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    start_game_tick_loop()
+    socketio.run(app, debug=True, port=5000, use_reloader=False)

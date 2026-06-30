@@ -50,16 +50,15 @@ function Keyboard({ activeKeys }) {
   );
 }
 
-function GameSequence({ code, initialGame, isViewer, onLeave, user }) {
-  const [game, setGame] = useState(initialGame);
+function GameSequence({ code, game, isViewer, onLeave, user }) {
   const [typed, setTyped] = useState("");
   const [count, setCount] = useState(0);
   const [activeKeys, setActiveKeys] = useState(() => new Set());
   const [completedRounds, setCompletedRounds] = useState(() => new Set());
   const [message, setMessage] = useState("");
   const [advancing, setAdvancing] = useState(false);
-  const previousRound = useRef(initialGame.round_index);
-  const previousPhase = useRef(initialGame.phase);
+  const previousRound = useRef(game.round_index);
+  const previousPhase = useRef(game.phase);
   const liveInput = useRef({ typed: "", count: 0 });
   const submittedRounds = useRef(new Set());
 
@@ -99,19 +98,6 @@ function GameSequence({ code, initialGame, isViewer, onLeave, user }) {
       setMessage("Score submission failed. Check your connection.");
     }
   }, [code, isViewer]);
-
-  useEffect(() => {
-    const timer = window.setInterval(async () => {
-      try {
-        const response = await fetch(`/lobbies/${code}/game`, { credentials: "include" });
-        const data = await response.json();
-        if (response.ok) setGame(data);
-      } catch {
-        setMessage("Connection interrupted. Retrying...");
-      }
-    }, 700);
-    return () => window.clearInterval(timer);
-  }, [code]);
 
   useEffect(() => {
     const roundChanged = previousRound.current !== game.round_index;
@@ -228,7 +214,6 @@ function GameSequence({ code, initialGame, isViewer, onLeave, user }) {
         setMessage(data.message || "Could not start the next round.");
         return;
       }
-      setGame(data);
     } catch {
       setMessage("Could not connect to the server.");
     } finally {

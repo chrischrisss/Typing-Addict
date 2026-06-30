@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import WaitingRoom from "./WaitingRoom";
+import { useLobbySocket } from "../hooks/useLobbySocket";
 
 const BLOCKED_NAME_TERMS = [
   "admin",
@@ -211,42 +212,21 @@ function Lobby({ handleLogout, user }) {
 
   const createdInviteCode = createdInvite?.code;
 
-  useEffect(() => {
-    if (!createdInviteCode) {
-      return;
-    }
-
-    let active = true;
-
-    async function refreshInviteCounts() {
-      try {
-        const response = await fetch(`/lobbies/${createdInviteCode}`, {
-          credentials: "include",
-        });
-        const data = await response.json();
-
-        if (!active || !response.ok) {
-          return;
+  useLobbySocket(createdInviteCode, {
+    onLobbyUpdated: (data) => {
+      setCreatedInvite((current) => {
+        if (!current) {
+          return current;
         }
 
-        setCreatedInvite((current) => ({
+        return {
           ...current,
           playerCount: data.player_count,
           viewerCount: data.viewer_count,
-        }));
-      } catch {
-        return;
-      }
-    }
-
-    refreshInviteCounts();
-    const timer = window.setInterval(refreshInviteCounts, 4000);
-
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-    };
-  }, [createdInviteCode]);
+        };
+      });
+    },
+  });
 
   async function saveName(event) {
     event.preventDefault();

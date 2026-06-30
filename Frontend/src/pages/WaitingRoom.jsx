@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import GameSequence from "./GameSequence";
+import { useLobbySocket } from "../hooks/useLobbySocket";
 
 function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [lobby, setLobby] = useState(initialLobby);
@@ -7,31 +8,38 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [loading, setLoading] = useState(false);
   const [exiting, setExiting] = useState(false);
 
-  const refreshLobby = useCallback(async () => {
-    try {
-      const response = await fetch(`/lobbies/${initialLobby.code}`, { credentials: "include" });
-      const data = await response.json();
+  useLobbySocket(lobby.code, {
+    onLobbyUpdated: (data) => {
+      const isPlayer = data.players?.some((player) => player.user_id === user.user_id);
+      const isViewer = data.viewers?.some((viewer) => viewer.user_id === user.user_id);
 
-      if (!response.ok || !data.role) {
+      if (!isPlayer && !isViewer) {
         setExiting(true);
-        onExit(data.message || "You are no longer in this lobby.");
+        onExit("You are no longer in this lobby.");
         return;
       }
 
-      setLobby(data);
-    } catch {
-      setMessage("Connection interrupted. Retrying...");
-    }
-  }, [initialLobby.code, onExit]);
+      const role = isViewer
+        ? "viewer"
+        : data.host_user_id === user.user_id
+          ? "host"
+          : "player";
 
-  useEffect(() => {
-    const kickoff = window.setTimeout(refreshLobby, 0);
-    const timer = window.setInterval(refreshLobby, 1500);
-    return () => {
-      window.clearTimeout(kickoff);
-      window.clearInterval(timer);
-    };
-  }, [refreshLobby]);
+      setLobby((current) => ({ ...current, ...data, role }));
+      setMessage("");
+    },
+    onGameState: (game) => {
+      setLobby((current) => ({ ...current, game }));
+      setMessage("");
+    },
+    onClosed: (data) => {
+      setExiting(true);
+      onExit(data.message || "Lobby closed.");
+    },
+    onError: () => {
+      setMessage("Live connection interrupted. Retrying...");
+    },
+  });
 
   async function leaveLobby() {
     setLoading(true);
@@ -54,9 +62,7 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
     const data = await response.json();
     if (!response.ok) {
       setMessage(data.message || "Could not kick that player.");
-      return;
     }
-    refreshLobby();
   }
 
   async function startGame() {
@@ -88,7 +94,7 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
     return (
       <GameSequence
         code={lobby.code}
-        initialGame={lobby.game}
+        game={lobby.game}
         isViewer={lobby.role === "viewer"}
         onLeave={leaveLobby}
         user={user}
