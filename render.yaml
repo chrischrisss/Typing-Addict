@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: typing-addict
+    runtime: python
+    rootDir: Backend
+    plan: starter
+    buildCommand: bash build.sh
+    startCommand: gunicorn --worker-class eventlet -w 1 --bind 0.0.0.0:$PORT app:app
+    healthCheckPath: /
+    envVars:
+      - key: RENDER
+        value: "true"
+      - key: DATABASE_URL
+        value: sqlite:////data/db.sqlite3
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: SECRET_KEY
+        generateValue: true
+    disk:
+      name: typing-addict-data
+      mountPath: /data
+      sizeGB: 1

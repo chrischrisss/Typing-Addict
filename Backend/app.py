@@ -2,7 +2,7 @@ import os
 import random
 from datetime import UTC, datetime, timedelta
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 from flask_jwt_extended import (
     JWTManager,
@@ -30,8 +30,28 @@ def utc_now():
     return datetime.now(UTC).replace(tzinfo=None)
 
 
+def is_render():
+    return os.environ.get("RENDER") == "true"
+
+
+def socket_cors_origins():
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if render_url:
+        return [render_url.rstrip("/")]
+
+    configured = os.environ.get("SOCKET_CORS_ORIGINS", "").strip()
+    if configured:
+        return [origin.strip().rstrip("/") for origin in configured.split(",") if origin.strip()]
+
+    return ["http://127.0.0.1:5173", "http://localhost:5173"]
+
+
 app = Flask(__name__)
-CORS(app, supports_credentials=True)
+
+if is_render():
+    CORS(app, supports_credentials=True, origins=socket_cors_origins())
+else:
+    CORS(app, supports_credentials=True)
 
 app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL", "sqlite:///db.sqlite3")
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
@@ -39,22 +59,18 @@ app.config["JWT_SECRET_KEY"] = os.environ.get(
     "JWT_SECRET_KEY",
     "development-only-secret-change-before-production",
 )
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", app.config["JWT_SECRET_KEY"])
 app.config["JWT_TOKEN_LOCATION"] = ["cookies"]
-app.config["JWT_COOKIE_SECURE"] = False
+app.config["JWT_COOKIE_SECURE"] = is_render()
 app.config["JWT_COOKIE_SAMESITE"] = "Lax"
 app.config["JWT_COOKIE_CSRF_PROTECT"] = False
 
 db.init_app(app)
 JWTManager(app)
 
-SOCKET_CORS_ORIGINS = os.environ.get(
-    "SOCKET_CORS_ORIGINS",
-    "http://127.0.0.1:5173,http://localhost:5173",
-).split(",")
-
 socketio = SocketIO(
     app,
-    cors_allowed_origins=SOCKET_CORS_ORIGINS,
+    cors_allowed_origins=socket_cors_origins(),
     manage_session=False,
 )
 
@@ -866,6 +882,29 @@ def submit_game_result(code):
     db.session.commit()
     broadcast_game(lobby, session)
     return jsonify({"score": score, "metric": metric, "accuracy": accuracy}), 201
+
+
+STATIC_DIR = os.path.join(app.root_path, "static")
+
+
+def register_frontend_routes():
+    if not os.path.isdir(STATIC_DIR):
+        return
+
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def serve_frontend(path):
+        if path:
+            asset_path = os.path.join(STATIC_DIR, path)
+            if os.path.isfile(asset_path):
+                return send_from_directory(STATIC_DIR, path)
+        return send_from_directory(STATIC_DIR, "index.html")
+
+
+register_frontend_routes()
+
+if is_render():
+    start_game_tick_loop()
 
 
 if __name__ == "__main__":
