@@ -6,3 +6,5 @@ dist/
 node_modules/
 *.sqlite3
 Backend/static/
+.cursor/
+render.yaml
