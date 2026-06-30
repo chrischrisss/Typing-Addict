@@ -515,6 +515,8 @@ def game_tick_loop():
                 continue
             try:
                 tick_active_games()
+            except Exception:
+                db.session.rollback()
             finally:
                 db.session.remove()
 

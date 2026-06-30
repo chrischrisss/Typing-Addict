@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import GameSequence from "./GameSequence";
 import { useLobbySocket } from "../hooks/useLobbySocket";
 
@@ -7,6 +7,40 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [exiting, setExiting] = useState(false);
+
+  useEffect(() => {
+    const phase = lobby.game?.phase;
+    if (!lobby.code || !phase || !["countdown", "running"].includes(phase)) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    async function pollGameState() {
+      try {
+        const response = await fetch(`/lobbies/${lobby.code}/game`, {
+          credentials: "include",
+        });
+        if (cancelled || !response.ok) {
+          return;
+        }
+        const game = await response.json();
+        if (cancelled) {
+          return;
+        }
+        setLobby((current) => ({ ...current, game }));
+      } catch {
+        // Socket updates or the next poll will retry.
+      }
+    }
+
+    pollGameState();
+    const intervalId = window.setInterval(pollGameState, 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [lobby.code, lobby.game?.phase, lobby.game?.round_index]);
 
   useLobbySocket(lobby.code, {
     onLobbyUpdated: (data) => {
