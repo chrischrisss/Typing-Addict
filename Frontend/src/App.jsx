@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import Login from "./pages/Login";
 import Lobby from "./pages/Lobby";
+import AdminDashboard from "./pages/AdminDashboard";
 import "./App.css";
 
 function App() {
@@ -121,7 +122,11 @@ function App() {
   }
 
   if (user) {
-    return <Lobby handleLogout={handleLogout} user={user.user ?? user} />;
+    const activeUser = user.user ?? user;
+    if (activeUser.username?.toLowerCase() === "admin") {
+      return <AdminDashboard handleLogout={handleLogout} user={activeUser} />;
+    }
+    return <Lobby handleLogout={handleLogout} user={activeUser} />;
   }
 
   return (

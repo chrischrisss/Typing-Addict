@@ -25,6 +25,9 @@ export function useLobbySocket(lobbyCode, handlers = {}) {
     socket.on("game:state", (data) => {
       handlersRef.current.onGameState?.(data);
     });
+    socket.on("game:progress", (data) => {
+      handlersRef.current.onGameProgress?.(data);
+    });
     socket.on("lobby:closed", (data) => {
       handlersRef.current.onClosed?.(data);
     });

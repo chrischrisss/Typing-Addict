@@ -194,6 +194,13 @@ button {
   color: #75a000;
 }
 
+.round-duration-copy {
+  margin: -8px 0 24px;
+  color: #656964;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .start-game-button {
   margin-top: 12px;
 }
@@ -207,6 +214,10 @@ button {
 .game-stage {
   display: flex;
   flex-direction: column;
+}
+
+.game-stage.spectator-stage {
+  overflow-y: auto;
 }
 
 .game-header {
@@ -229,6 +240,103 @@ button {
   width: min(820px, 100%);
   margin: 30px auto 0;
   color: #d8ff3e;
+  font-weight: 800;
+  text-align: center;
+}
+
+.spectator-progress {
+  width: min(920px, 100%);
+  margin: 28px auto auto;
+  padding: clamp(24px, 4vw, 40px);
+  color: #161816;
+  background: #f4f1e8;
+  border-radius: 8px;
+  box-shadow: 10px 10px 0 #d8ff3e;
+}
+
+.spectator-progress-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.spectator-progress-heading h2 {
+  margin: 4px 0 0;
+  font-size: clamp(1.55rem, 3vw, 2.2rem);
+  text-transform: uppercase;
+}
+
+.spectator-progress-heading > span {
+  color: #568000;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.progress-racers {
+  display: grid;
+  gap: 14px;
+}
+
+.progress-racer {
+  display: grid;
+  gap: 7px;
+}
+
+.progress-racer-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 0.9rem;
+}
+
+.progress-racer-meta strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-racer-meta strong span,
+.progress-racer-meta b {
+  color: #568000;
+}
+
+.money-track {
+  padding: 0 17px;
+}
+
+.money-lane {
+  position: relative;
+  height: 22px;
+  border-bottom: 2px dashed #9bbd1b;
+}
+
+.money-marker {
+  position: absolute;
+  bottom: -15px;
+  left: var(--player-progress);
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  color: #161816;
+  background: #d8ff3e;
+  border: 2px solid #161816;
+  border-radius: 50%;
+  box-shadow: 0 3px 0 #7c941e;
+  font-size: 1.15rem;
+  font-weight: 1000;
+  transform: translateX(-50%);
+  transition: left 180ms linear;
+}
+
+.progress-empty {
+  margin: 20px 0;
+  color: #656964;
   font-weight: 800;
   text-align: center;
 }
@@ -670,7 +778,9 @@ button {
 .profile-sheet,
 .lobby-sheet {
   width: min(460px, 100%);
+  max-height: calc(100vh - 48px);
   padding: 44px;
+  overflow-y: auto;
   color: #161816;
   background: #f4f1e8;
   border-radius: 8px;
@@ -802,6 +912,31 @@ button {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+.settings-heading {
+  margin: 2px 0 14px;
+  color: #555a56;
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.rounds-grid input {
+  margin-bottom: 14px;
+}
+
+.random-role-note,
+.invite-settings {
+  margin: 0 0 22px;
+  padding: 14px;
+  color: #555a56;
+  background: #e5e2d9;
+  border-left: 4px solid #9bbd1b;
+  border-radius: 4px;
+  font-weight: 800;
+  line-height: 1.45;
 }
 
 .invite-sheet {
@@ -1051,6 +1186,220 @@ button {
   font-size: 0.75rem;
 }
 
+.admin-page {
+  position: relative;
+  min-height: 100vh;
+  padding: 38px 48px 60px;
+  overflow: hidden;
+  color: #f4f1e8;
+  background: #0d0f0e;
+}
+
+.admin-header,
+.admin-tabs,
+.admin-table-wrap,
+.admin-message {
+  position: relative;
+  z-index: 1;
+  width: min(1240px, 100%);
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.admin-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.admin-header h1 {
+  margin: 0;
+  font-size: clamp(2.8rem, 7vw, 6rem);
+  line-height: 0.9;
+  text-transform: uppercase;
+}
+
+.admin-header > div > p:last-child {
+  margin: 18px 0 0;
+  color: #a5aaa7;
+  font-weight: 800;
+}
+
+.admin-message {
+  min-height: 24px;
+  margin-top: 28px;
+  margin-bottom: 12px;
+  color: #d8ff3e;
+  font-weight: 800;
+}
+
+.admin-tabs {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.admin-tabs button {
+  padding: 13px 18px;
+  color: #a5aaa7;
+  background: #252925;
+  border: 1px solid #555a56;
+  border-radius: 5px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.admin-tabs button.active {
+  color: #161816;
+  background: #d8ff3e;
+  border-color: #d8ff3e;
+}
+
+.admin-tabs button span {
+  display: inline-grid;
+  min-width: 24px;
+  min-height: 24px;
+  margin-left: 8px;
+  place-items: center;
+  background: rgba(13, 15, 14, 0.14);
+  border-radius: 50%;
+}
+
+.admin-table-wrap {
+  display: block;
+}
+
+.admin-panel {
+  min-width: 0;
+  width: 100%;
+  padding: 30px;
+  color: #161816;
+  background: #f4f1e8;
+  border-radius: 8px;
+  box-shadow: 10px 10px 0 #d8ff3e;
+}
+
+.admin-panel-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 22px;
+}
+
+.admin-panel-heading h2 {
+  margin: 0;
+  font-size: 1.8rem;
+  text-transform: uppercase;
+}
+
+.admin-panel-heading > span {
+  color: #568000;
+  font-size: 1.6rem;
+  font-weight: 900;
+}
+
+.admin-list {
+  display: grid;
+  gap: 10px;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+
+.admin-user-row,
+.admin-lobby-row {
+  display: grid;
+  gap: 12px;
+  align-items: center;
+  padding: 14px;
+  background: #fff;
+  border: 1px solid #d5d3cb;
+  border-radius: 5px;
+}
+
+.admin-user-row {
+  grid-template-columns: minmax(120px, 0.8fr) minmax(140px, 1fr) auto;
+}
+
+.admin-lobby-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
+.admin-user-identity,
+.admin-lobby-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.admin-user-row small,
+.admin-lobby-row small {
+  color: #656964;
+}
+
+.admin-user-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.admin-lobby-row small {
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.admin-user-row input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  color: #161816;
+  background: #f4f1e8;
+  border: 2px solid #c7c5bd;
+  border-radius: 4px;
+  outline: none;
+}
+
+.admin-user-row input:focus {
+  border-color: #161816;
+  box-shadow: 0 0 0 3px #d8ff3e;
+}
+
+.admin-user-row button,
+.admin-lobby-row button {
+  padding: 9px 12px;
+  border: 2px solid #161816;
+  border-radius: 4px;
+  font-size: 0.78rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.admin-user-row button {
+  color: #161816;
+  background: #d8ff3e;
+}
+
+.admin-lobby-row > span {
+  color: #568000;
+  font-size: 0.82rem;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.admin-lobby-row button {
+  color: #f4f1e8;
+  background: #9d2727;
+  border-color: #9d2727;
+}
+
+.admin-empty {
+  margin: 30px 0;
+  color: #656964;
+  font-weight: 800;
+  text-align: center;
+}
+
 @media (max-width: 820px) {
   .waiting-page,
   .game-stage,
@@ -1080,6 +1429,15 @@ button {
   .typing-board,
   .action-board {
     margin: 40px auto auto;
+  }
+
+  .spectator-progress {
+    margin-top: 24px;
+    padding: 22px 16px;
+  }
+
+  .spectator-progress-heading {
+    align-items: flex-start;
   }
 
   .integrated-typing {
@@ -1172,5 +1530,34 @@ button {
 
   .responsible-note {
     right: 22px;
+  }
+
+  .admin-page {
+    padding: 24px 20px 48px;
+  }
+
+  .admin-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .admin-tabs button {
+    padding: 11px 8px;
+    font-size: 0.72rem;
+  }
+
+  .admin-panel {
+    padding: 22px 16px;
+    box-shadow: 8px 8px 0 #d8ff3e;
+  }
+
+  .admin-user-row,
+  .admin-lobby-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-user-row button,
+  .admin-lobby-row button {
+    width: 100%;
   }
 }

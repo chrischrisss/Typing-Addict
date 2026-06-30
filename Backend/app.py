@@ -15,6 +15,7 @@ from flask_jwt_extended import (
     unset_jwt_cookies,
 )
 from flask_socketio import SocketIO, emit, join_room
+from sqlalchemy import inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from games import calc_score, calc_wpm, check_progress, pick_prompt, score_clicking, score_spacebar
@@ -22,9 +23,14 @@ from models import GameControl, GameResult, GameSession, Lobby, Player, User, Us
 
 
 CODE_CHARACTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-GAME_ORDER = ("typing", "clicking", "spacebar")
-ROUND_DURATION = 30
+GAME_TYPES = ("typing", "clicking", "spacebar")
+DEFAULT_ROUND_DURATION = 30
 START_COUNTDOWN_DURATION = 3
+LIVE_PROGRESS = {}
+ACTION_PROGRESS_TARGETS = {
+    "clicking": 150,
+    "spacebar": 200,
+}
 
 
 def utc_now():
@@ -119,8 +125,25 @@ socketio = SocketIO(
 )
 
 
+def ensure_lobby_settings_columns():
+    existing = {column["name"] for column in inspect(db.engine).get_columns("lobby")}
+    settings = {
+        "typing_rounds": 1,
+        "clicking_rounds": 1,
+        "spacebar_rounds": 1,
+        "round_duration": DEFAULT_ROUND_DURATION,
+    }
+    for column, default in settings.items():
+        if column not in existing:
+            db.session.execute(text(
+                f"ALTER TABLE lobby ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default}"
+            ))
+    db.session.commit()
+
+
 with app.app_context():
     db.create_all()
+    ensure_lobby_settings_columns()
 
     if not User.query.first():
         user = User(
@@ -264,6 +287,11 @@ def display_name_for(user):
     return user.profile.display_name if user.profile else user.username
 
 
+def is_admin_user(user_id):
+    user = db.session.get(User, user_id)
+    return bool(user and user.username.lower() == "admin")
+
+
 def lobby_members(lobby):
     players = Player.query.filter_by(lobby_id=lobby.id).all()
     viewers = Viewer.query.filter_by(lobby_id=lobby.id).all()
@@ -287,6 +315,14 @@ def lobby_members(lobby):
             for viewer in viewers
         ],
     }
+
+
+def game_order_for(lobby):
+    return (
+        ["typing"] * lobby.typing_rounds
+        + ["clicking"] * lobby.clicking_rounds
+        + ["spacebar"] * lobby.spacebar_rounds
+    )
 
 
 def game_control(session):
@@ -320,7 +356,7 @@ def sync_game_control(lobby, session, control):
             game_session_id=session.id,
             round_index=control.round_index,
         ).count()
-        if elapsed >= ROUND_DURATION or (player_count > 0 and result_count >= player_count):
+        if elapsed >= lobby.round_duration or (player_count > 0 and result_count >= player_count):
             control.phase = "leaderboard"
             changed = True
 
@@ -330,13 +366,14 @@ def sync_game_control(lobby, session, control):
 
 def round_state(lobby, session, control):
     sync_game_control(lobby, session, control)
-    game_type = GAME_ORDER[control.round_index]
+    game_order = game_order_for(lobby)
+    game_type = game_order[control.round_index]
     elapsed = max(0, (utc_now() - control.round_started_at).total_seconds())
 
     if control.phase == "countdown":
         seconds = max(1, round((control.round_started_at - utc_now()).total_seconds()))
     elif control.phase == "running":
-        seconds = max(0, round(ROUND_DURATION - elapsed))
+        seconds = max(0, round(lobby.round_duration - elapsed))
     else:
         seconds = 0
 
@@ -345,12 +382,12 @@ def round_state(lobby, session, control):
         "round_index": control.round_index,
         "game_type": game_type,
         "next_game_type": (
-            GAME_ORDER[control.round_index + 1]
-            if control.round_index < len(GAME_ORDER) - 1
+            game_order[control.round_index + 1]
+            if control.round_index < len(game_order) - 1
             else None
         ),
         "seconds_remaining": seconds,
-        "elapsed_seconds": min(ROUND_DURATION, max(0.01, elapsed)),
+        "elapsed_seconds": min(lobby.round_duration, max(0.01, elapsed)),
     }
 
 
@@ -382,10 +419,11 @@ def game_payload(lobby, session=None):
 
     state.update({
         "session_id": session.id,
-        "game_order": list(GAME_ORDER),
-        "round_duration": ROUND_DURATION,
+        "game_order": game_order_for(lobby),
+        "round_duration": lobby.round_duration,
         "host_user_id": lobby.host_user_id,
-        "prompt": session.typing_prompt if state["round_index"] == 0 else None,
+        "prompt": session.typing_prompt if state["game_type"] == "typing" else None,
+        "live_progress": live_progress_payload(lobby, session, control),
         "results": [
             {
                 "user_id": result.user_id,
@@ -421,6 +459,10 @@ def lobby_payload(lobby, role=None, include_members=False):
         "host_user_id": lobby.host_user_id,
         "player_limit": lobby.player_limit,
         "viewer_limit": lobby.viewer_limit,
+        "typing_rounds": lobby.typing_rounds,
+        "clicking_rounds": lobby.clicking_rounds,
+        "spacebar_rounds": lobby.spacebar_rounds,
+        "round_duration": lobby.round_duration,
         "player_count": player_count,
         "viewer_count": viewer_count,
     }
@@ -437,6 +479,76 @@ def lobby_payload(lobby, role=None, include_members=False):
 
 def lobby_room(code):
     return f"lobby:{code}"
+
+
+def viewer_room(code):
+    return f"lobby:{code}:viewers"
+
+
+def live_progress_payload(lobby, session, control):
+    members = lobby_members(lobby)["players"]
+    progress = LIVE_PROGRESS.get((session.id, control.round_index), {})
+    game_type = game_order_for(lobby)[control.round_index]
+
+    players = []
+    for member in members:
+        value = progress.get(member["user_id"], 0)
+        if game_type == "typing":
+            percent = round((value / max(1, len(session.typing_prompt))) * 100)
+        else:
+            percent = round((value / ACTION_PROGRESS_TARGETS[game_type]) * 100)
+        players.append({
+            "user_id": member["user_id"],
+            "name": member["name"],
+            "progress": min(100, max(0, percent)),
+            "value": value,
+        })
+
+    players.sort(key=lambda player: (-player["value"], player["name"].lower()))
+    return {
+        "round_index": control.round_index,
+        "game_type": game_type,
+        "players": players[:10],
+    }
+
+
+def broadcast_live_progress(lobby, session, control):
+    socketio.emit(
+        "game:progress",
+        live_progress_payload(lobby, session, control),
+        room=viewer_room(lobby.code),
+    )
+
+
+def record_live_progress(lobby, user_id, data):
+    if lobby_membership(lobby.id, user_id) != "player":
+        return None
+
+    session = GameSession.query.filter_by(lobby_id=lobby.id).first()
+    if not session:
+        return None
+
+    control = game_control(session)
+    state = round_state(lobby, session, control)
+    data = data if isinstance(data, dict) else {}
+    if (
+        state["phase"] != "running"
+        or data.get("round_index") != control.round_index
+        or data.get("game_type") != state["game_type"]
+    ):
+        return None
+
+    if state["game_type"] == "typing":
+        typed = str(data.get("typed", ""))[:len(session.typing_prompt)]
+        value = check_progress(session.typing_prompt, typed)["correct"]
+    else:
+        try:
+            value = max(0, min(10000, int(data.get("count", 0))))
+        except (TypeError, ValueError):
+            return None
+
+    LIVE_PROGRESS.setdefault((session.id, control.round_index), {})[user_id] = value
+    return session, control
 
 
 def broadcast_lobby(lobby):
@@ -481,15 +593,42 @@ def handle_connect():
 
     code = str(request.args.get("lobby", "")).strip().upper()
     lobby = find_lobby(code)
-    if not lobby or not membership_role(lobby, user_id):
+    role = membership_role(lobby, user_id) if lobby else None
+    if not lobby or not role:
         return False
 
     join_room(lobby_room(lobby.code))
+    if role == "viewer":
+        join_room(viewer_room(lobby.code))
     emit("lobby:updated", lobby_payload(lobby, include_members=True))
     game = game_payload(lobby)
     if game:
         emit("game:state", game)
+        if role == "viewer":
+            session = GameSession.query.filter_by(lobby_id=lobby.id).first()
+            control = game_control(session)
+            emit("game:progress", live_progress_payload(lobby, session, control))
     return True
+
+
+@socketio.on("game:progress:update")
+def handle_game_progress(data):
+    token = request.cookies.get("access_token_cookie")
+    try:
+        user_id = int(decode_token(token)["sub"])
+    except Exception:
+        return
+
+    code = str(request.args.get("lobby", "")).strip().upper()
+    lobby = find_lobby(code)
+    if not lobby:
+        return
+
+    recorded = record_live_progress(lobby, user_id, data)
+    if not recorded:
+        return
+    session, control = recorded
+    broadcast_live_progress(lobby, session, control)
 
 
 def tick_active_games():
@@ -505,6 +644,7 @@ def tick_active_games():
             continue
         sync_game_control(lobby, session, control)
         broadcast_game(lobby, session)
+        broadcast_live_progress(lobby, session, control)
 
 
 def game_tick_loop():
@@ -539,6 +679,10 @@ def create_lobby():
     name = str(data.get("name", "")).strip()
     player_limit = data.get("player_limit")
     viewer_limit = data.get("viewer_limit")
+    typing_rounds = data.get("typing_rounds", 1)
+    clicking_rounds = data.get("clicking_rounds", 1)
+    spacebar_rounds = data.get("spacebar_rounds", 1)
+    round_duration = data.get("round_duration", DEFAULT_ROUND_DURATION)
 
     if len(name) < 3 or len(name) > 32:
         return jsonify({"message": "Lobby name must be 3 to 32 characters."}), 400
@@ -546,8 +690,12 @@ def create_lobby():
     try:
         player_limit = int(player_limit)
         viewer_limit = int(viewer_limit)
+        typing_rounds = int(typing_rounds)
+        clicking_rounds = int(clicking_rounds)
+        spacebar_rounds = int(spacebar_rounds)
+        round_duration = int(round_duration)
     except (TypeError, ValueError):
-        return jsonify({"message": "Player and viewer limits must be numbers."}), 400
+        return jsonify({"message": "Lobby settings must be whole numbers."}), 400
 
     if player_limit < 2 or player_limit > 12:
         return jsonify({"message": "Player size must be between 2 and 12."}), 400
@@ -555,7 +703,16 @@ def create_lobby():
     if viewer_limit < 0 or viewer_limit > 100:
         return jsonify({"message": "Viewer size must be between 0 and 100."}), 400
 
+    round_counts = (typing_rounds, clicking_rounds, spacebar_rounds)
+    if any(count < 1 or count > 10 for count in round_counts):
+        return jsonify({"message": "Each game mode must have 1 to 10 rounds."}), 400
+
+    if round_duration < 5 or round_duration > 300:
+        return jsonify({"message": "Round time must be between 5 and 300 seconds."}), 400
+
     user_id = int(get_jwt_identity())
+    if is_admin_user(user_id):
+        return jsonify({"message": "Admin accounts cannot create lobbies."}), 403
     code = generate_unique_lobby_code()
 
     lobby = Lobby(
@@ -564,6 +721,10 @@ def create_lobby():
         host_user_id=user_id,
         player_limit=player_limit,
         viewer_limit=viewer_limit,
+        typing_rounds=typing_rounds,
+        clicking_rounds=clicking_rounds,
+        spacebar_rounds=spacebar_rounds,
+        round_duration=round_duration,
     )
     db.session.add(lobby)
     db.session.flush()
@@ -599,18 +760,15 @@ def get_lobby(code):
 @app.post("/lobbies/<code>/join")
 @jwt_required()
 def join_lobby(code):
-    data = request.get_json(silent=True) or {}
-    role = str(data.get("role", "player")).strip().lower()
-
-    if role not in ("player", "viewer"):
-        return jsonify({"message": "Join as a player or a viewer."}), 400
-
     lobby = find_lobby(code)
 
     if not lobby:
         return jsonify({"message": "Lobby not found."}), 404
 
     user_id = int(get_jwt_identity())
+    if is_admin_user(user_id):
+        return jsonify({"message": "Admin accounts cannot join lobbies."}), 403
+
     existing_role = lobby_membership(lobby.id, user_id)
 
     if existing_role:
@@ -621,14 +779,20 @@ def join_lobby(code):
 
         return jsonify(lobby_payload(lobby, response_role, include_members=True))
 
-    if role == "player":
-        if GameSession.query.filter_by(lobby_id=lobby.id).first():
-            return jsonify({"message": "This game has already started."}), 409
+    player_count = Player.query.filter_by(lobby_id=lobby.id).count()
+    viewer_count = Viewer.query.filter_by(lobby_id=lobby.id).count()
+    game_started = GameSession.query.filter_by(lobby_id=lobby.id).first() is not None
+    available_roles = []
+    if not game_started and player_count < lobby.player_limit:
+        available_roles.append("player")
+    if lobby.viewer_limit > 0 and viewer_count < lobby.viewer_limit:
+        available_roles.append("viewer")
 
-        player_count = Player.query.filter_by(lobby_id=lobby.id).count()
+    if not available_roles:
+        return jsonify({"message": "This lobby has no open spots."}), 409
 
-        if player_count >= lobby.player_limit:
-            return jsonify({"message": "That lobby is full."}), 409
+    response_role = random.choice(available_roles)
+    if response_role == "player":
 
         db.session.add(
             Player(
@@ -637,24 +801,13 @@ def join_lobby(code):
                 score=0,
             )
         )
-        response_role = "host" if lobby.host_user_id == user_id else "player"
     else:
-        if lobby.viewer_limit <= 0:
-            return jsonify({"message": "This lobby has no viewer slots."}), 409
-
-        viewer_count = Viewer.query.filter_by(lobby_id=lobby.id).count()
-
-        if viewer_count >= lobby.viewer_limit:
-            return jsonify({"message": "Viewer slots are full."}), 409
-
         db.session.add(
             Viewer(
                 user_id=user_id,
                 lobby_id=lobby.id,
             )
         )
-        response_role = "viewer"
-
     db.session.commit()
     broadcast_lobby(lobby)
 
@@ -664,6 +817,8 @@ def join_lobby(code):
 def delete_lobby_data(lobby):
     session = GameSession.query.filter_by(lobby_id=lobby.id).first()
     if session:
+        for key in [key for key in LIVE_PROGRESS if key[0] == session.id]:
+            LIVE_PROGRESS.pop(key, None)
         GameControl.query.filter_by(game_session_id=session.id).delete()
         GameResult.query.filter_by(game_session_id=session.id).delete()
         db.session.delete(session)
@@ -671,6 +826,124 @@ def delete_lobby_data(lobby):
     Player.query.filter_by(lobby_id=lobby.id).delete()
     Viewer.query.filter_by(lobby_id=lobby.id).delete()
     db.session.delete(lobby)
+
+
+def admin_user_rows(admin_id):
+    return [
+        {
+            "user_id": user.id,
+            "username": user.username,
+            "display_name": user.profile.display_name if user.profile else "",
+            "is_admin": user.id == admin_id,
+        }
+        for user in User.query.order_by(User.username.asc()).all()
+    ]
+
+
+def admin_lobby_rows():
+    return [
+        {
+            "code": lobby.code,
+            "name": lobby.name,
+            "host_user_id": lobby.host_user_id,
+            "host_username": lobby.host.username,
+            "host_name": display_name_for(lobby.host),
+            "player_count": Player.query.filter_by(lobby_id=lobby.id).count(),
+            "player_limit": lobby.player_limit,
+            "viewer_count": Viewer.query.filter_by(lobby_id=lobby.id).count(),
+            "viewer_limit": lobby.viewer_limit,
+        }
+        for lobby in Lobby.query.order_by(Lobby.created_at.desc()).all()
+    ]
+
+
+@app.get("/admin/dashboard")
+@jwt_required()
+def admin_dashboard():
+    admin_id = int(get_jwt_identity())
+    if not is_admin_user(admin_id):
+        return jsonify({"message": "Admin access required."}), 403
+    return jsonify({
+        "users": admin_user_rows(admin_id),
+        "lobbies": admin_lobby_rows(),
+    })
+
+
+@app.get("/admin/users")
+@jwt_required()
+def admin_users():
+    admin_id = int(get_jwt_identity())
+    if not is_admin_user(admin_id):
+        return jsonify({"message": "Admin access required."}), 403
+
+    return jsonify({"users": admin_user_rows(admin_id)})
+
+
+@app.put("/admin/users/<int:target_user_id>/profile")
+@jwt_required()
+def admin_update_user_profile(target_user_id):
+    if not is_admin_user(int(get_jwt_identity())):
+        return jsonify({"message": "Admin access required."}), 403
+
+    user = db.session.get(User, target_user_id)
+    if not user:
+        return jsonify({"message": "User not found."}), 404
+
+    data = request.get_json(silent=True) or {}
+    display_name = " ".join(str(data.get("display_name", "")).strip().split())
+    if len(display_name) < 3 or len(display_name) > 18:
+        return jsonify({"message": "Display name must be 3 to 18 characters."}), 400
+    if not all(character.isalnum() or character in " _-" for character in display_name):
+        return jsonify({"message": "Display name contains unsupported characters."}), 400
+
+    if user.profile:
+        user.profile.display_name = display_name
+    else:
+        db.session.add(UserProfile(user_id=user.id, display_name=display_name))
+    db.session.commit()
+
+    lobby_ids = {
+        membership.lobby_id
+        for membership in [
+            *Player.query.filter_by(user_id=user.id).all(),
+            *Viewer.query.filter_by(user_id=user.id).all(),
+        ]
+    }
+    for lobby_id in lobby_ids:
+        lobby = db.session.get(Lobby, lobby_id)
+        if lobby:
+            broadcast_lobby(lobby)
+    return jsonify({
+        "user_id": user.id,
+        "username": user.username,
+        "display_name": display_name,
+    })
+
+
+@app.get("/admin/lobbies")
+@jwt_required()
+def admin_lobbies():
+    if not is_admin_user(int(get_jwt_identity())):
+        return jsonify({"message": "Admin access required."}), 403
+
+    return jsonify({"lobbies": admin_lobby_rows()})
+
+
+@app.delete("/admin/lobbies/<code>")
+@jwt_required()
+def admin_close_lobby(code):
+    if not is_admin_user(int(get_jwt_identity())):
+        return jsonify({"message": "Admin access required."}), 403
+
+    lobby = find_lobby(code)
+    if not lobby:
+        return jsonify({"message": "Lobby not found."}), 404
+
+    lobby_code = lobby.code
+    delete_lobby_data(lobby)
+    db.session.commit()
+    broadcast_lobby_closed(lobby_code, "This lobby was closed by an administrator.")
+    return jsonify({"message": "Lobby closed."})
 
 
 @app.delete("/lobbies/<code>/leave")
@@ -803,7 +1076,8 @@ def start_next_round(code):
     if control.phase != "leaderboard":
         return jsonify({"message": "Finish the current round first."}), 409
 
-    if control.round_index >= len(GAME_ORDER) - 1:
+    game_order = game_order_for(lobby)
+    if control.round_index >= len(game_order) - 1:
         control.phase = "finished"
     else:
         control.round_index += 1
@@ -832,6 +1106,27 @@ def get_lobby_game(code):
     return jsonify(game)
 
 
+@app.post("/lobbies/<code>/game/progress")
+@jwt_required()
+def update_game_progress(code):
+    lobby = find_lobby(code)
+    if not lobby:
+        return jsonify({"message": "Lobby not found."}), 404
+
+    user_id = int(get_jwt_identity())
+    if lobby_membership(lobby.id, user_id) != "player":
+        return jsonify({"message": "Only players can report progress."}), 403
+
+    recorded = record_live_progress(lobby, user_id, request.get_json(silent=True) or {})
+    if not recorded:
+        return jsonify({"message": "That round is not accepting progress."}), 409
+
+    session, control = recorded
+    payload = live_progress_payload(lobby, session, control)
+    socketio.emit("game:progress", payload, room=viewer_room(lobby.code))
+    return jsonify(payload)
+
+
 @app.post("/lobbies/<code>/game/submit")
 @jwt_required()
 def submit_game_result(code):
@@ -856,9 +1151,10 @@ def submit_game_result(code):
 
     control = game_control(session)
     state = round_state(lobby, session, control)
+    game_order = game_order_for(lobby)
     if (
         submitted_round < 0
-        or submitted_round >= len(GAME_ORDER)
+        or submitted_round >= len(game_order)
         or submitted_round > state["round_index"]
         or (
             submitted_round == state["round_index"]
@@ -876,12 +1172,12 @@ def submit_game_result(code):
         return jsonify({"score": existing.score, "message": "Result already submitted."})
 
     elapsed = (
-        state.get("elapsed_seconds", ROUND_DURATION)
+        state.get("elapsed_seconds", lobby.round_duration)
         if submitted_round == state["round_index"]
-        else ROUND_DURATION
+        else lobby.round_duration
     )
-    elapsed = min(ROUND_DURATION, max(0.01, elapsed))
-    game_type = GAME_ORDER[submitted_round]
+    elapsed = min(lobby.round_duration, max(0.01, elapsed))
+    game_type = game_order[submitted_round]
     accuracy = None
 
     if game_type == "typing":

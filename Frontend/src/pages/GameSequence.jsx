@@ -50,7 +50,56 @@ function Keyboard({ activeKeys }) {
   );
 }
 
-function GameSequence({ code, game, isViewer, onLeave, user }) {
+function SpectatorProgress({ game, liveProgress }) {
+  const fallback = (game.standings || []).slice(0, 10).map((player) => ({
+    ...player,
+    progress: 0,
+  }));
+  const currentProgress = liveProgress?.round_index === game.round_index
+    ? liveProgress
+    : game.live_progress?.round_index === game.round_index
+      ? game.live_progress
+      : null;
+  const players = currentProgress?.players || fallback;
+
+  return (
+    <section className="spectator-progress" aria-label="Live player progress">
+      <div className="spectator-progress-heading">
+        <div>
+          <p className="status-kicker">Live race</p>
+          <h2>Top 10 progress</h2>
+        </div>
+        <span>Updates live</span>
+      </div>
+      <div className="progress-racers" aria-live="polite">
+        {players.length > 0 ? players.map((player, index) => {
+          const progress = Math.max(0, Math.min(100, Number(player.progress) || 0));
+          return (
+            <div className="progress-racer" key={player.user_id}>
+              <div className="progress-racer-meta">
+                <strong><span>#{index + 1}</span> {player.name}</strong>
+                <b>{Math.round(progress)}%</b>
+              </div>
+              <div className="money-track">
+                <div className="money-lane">
+                  <span
+                    className="money-marker"
+                    style={{ "--player-progress": `${progress}%` }}
+                    aria-hidden="true"
+                  >$</span>
+                </div>
+              </div>
+            </div>
+          );
+        }) : (
+          <p className="progress-empty">Waiting for players...</p>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress, user }) {
   const [typed, setTyped] = useState("");
   const [count, setCount] = useState(0);
   const [activeKeys, setActiveKeys] = useState(() => new Set());
@@ -61,6 +110,39 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
   const previousPhase = useRef(game.phase);
   const liveInput = useRef({ typed: "", count: 0 });
   const submittedRounds = useRef(new Set());
+  const progressTimeout = useRef(null);
+  const queuedProgress = useRef(null);
+  const lastProgressSent = useRef(0);
+
+  const publishProgress = useCallback((progress) => {
+    if (isViewer) return;
+
+    queuedProgress.current = {
+      round_index: game.round_index,
+      game_type: game.game_type,
+      ...progress,
+    };
+
+    const send = () => {
+      progressTimeout.current = null;
+      lastProgressSent.current = Date.now();
+      onProgress?.(queuedProgress.current);
+      queuedProgress.current = null;
+    };
+    const delay = Math.max(0, 100 - (Date.now() - lastProgressSent.current));
+
+    if (delay === 0) {
+      send();
+    } else if (progressTimeout.current == null) {
+      progressTimeout.current = window.setTimeout(send, delay);
+    }
+  }, [game.game_type, game.round_index, isViewer, onProgress]);
+
+  useEffect(() => () => {
+    if (progressTimeout.current != null) {
+      window.clearTimeout(progressTimeout.current);
+    }
+  }, []);
 
   const submitRound = useCallback(async (roundIndex, values) => {
     if (isViewer || submittedRounds.current.has(roundIndex)) return;
@@ -134,6 +216,7 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
         const next = liveInput.current.typed.slice(0, -1);
         liveInput.current.typed = next;
         setTyped(next);
+        publishProgress({ typed: next });
         return;
       }
 
@@ -144,6 +227,7 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
       const next = liveInput.current.typed + event.key;
       liveInput.current.typed = next;
       setTyped(next);
+      publishProgress({ typed: next });
       setMessage("");
 
       if (next === game.prompt) {
@@ -180,7 +264,7 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
       window.removeEventListener("paste", blockPaste);
       window.removeEventListener("blur", clearKeys);
     };
-  }, [game.phase, game.game_type, game.prompt, game.round_index, isViewer, submitRound]);
+  }, [game.phase, game.game_type, game.prompt, game.round_index, isViewer, publishProgress, submitRound]);
 
   useEffect(() => {
     if (game.phase !== "running" || game.game_type !== "spacebar" || isViewer) return undefined;
@@ -189,16 +273,18 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
         event.preventDefault();
         liveInput.current.count += 1;
         setCount(liveInput.current.count);
+        publishProgress({ count: liveInput.current.count });
       }
     }
     window.addEventListener("keydown", handleSpacebar);
     return () => window.removeEventListener("keydown", handleSpacebar);
-  }, [game.phase, game.game_type, isViewer]);
+  }, [game.phase, game.game_type, isViewer, publishProgress]);
 
   function registerClick() {
     if (game.phase !== "running" || isViewer) return;
     liveInput.current.count += 1;
     setCount(liveInput.current.count);
+    publishProgress({ count: liveInput.current.count });
   }
 
   async function advanceRound() {
@@ -289,19 +375,21 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
   const typingComplete = completedRounds.has(game.round_index);
 
   return (
-    <main className="game-stage page-enter">
+    <main className={`game-stage page-enter${isViewer ? " spectator-stage" : ""}`}>
       <header className="game-header">
         <div>
-          <p className="eyebrow">Round {game.round_index + 1} of 3</p>
+          <p className="eyebrow">Round {game.round_index + 1} of {game.game_order?.length || 3}</p>
           <h1>{TITLES[game.game_type]}</h1>
         </div>
         <div className="game-timer">{game.seconds_remaining}</div>
         <button className="danger-button" type="button" onClick={onLeave}>Leave</button>
       </header>
 
-      {isViewer && <p className="spectator-banner">Spectating — scores update after each round.</p>}
+      {isViewer && <p className="spectator-banner">Spectating — player progress updates live.</p>}
 
-      {game.game_type === "typing" && (
+      {isViewer && <SpectatorProgress game={game} liveProgress={liveProgress} />}
+
+      {!isViewer && game.game_type === "typing" && (
         <section className="typing-board integrated-typing" aria-label="Typing passage">
           <div className="typing-overlay" aria-live="polite">
             {game.prompt?.split("").map((character, index) => {
@@ -326,7 +414,7 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
         </section>
       )}
 
-      {game.game_type === "clicking" && (
+      {!isViewer && game.game_type === "clicking" && (
         <section className="action-board">
           <div className="action-count">{count}</div>
           <button className="click-target" type="button" disabled={isViewer} onClick={registerClick}>
@@ -335,7 +423,7 @@ function GameSequence({ code, game, isViewer, onLeave, user }) {
         </section>
       )}
 
-      {game.game_type === "spacebar" && (
+      {!isViewer && game.game_type === "spacebar" && (
         <section className="action-board">
           <div className="action-count">{count}</div>
           <div className={`spacebar-key ${activeKeys.has("Space") ? "active" : ""}`}>Spacebar</div>

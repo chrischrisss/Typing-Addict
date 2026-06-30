@@ -74,12 +74,15 @@ function Lobby({ handleLogout, user }) {
   const [message, setMessage] = useState("");
   const [lobbyMode, setLobbyMode] = useState("home");
   const [joinCode, setJoinCode] = useState(initialInviteCode);
-  const [joinRole, setJoinRole] = useState("player");
   const [joinMessage, setJoinMessage] = useState("");
   const [inviteNotice, setInviteNotice] = useState("");
   const [lobbyName, setLobbyName] = useState("");
   const [playerLimit, setPlayerLimit] = useState(4);
   const [viewerLimit, setViewerLimit] = useState(12);
+  const [typingRounds, setTypingRounds] = useState(1);
+  const [clickingRounds, setClickingRounds] = useState(1);
+  const [spacebarRounds, setSpacebarRounds] = useState(1);
+  const [roundDuration, setRoundDuration] = useState(30);
   const [createMessage, setCreateMessage] = useState("");
   const [createdInvite, setCreatedInvite] = useState(null);
   const [joinLobbyInfo, setJoinLobbyInfo] = useState(null);
@@ -135,7 +138,7 @@ function Lobby({ handleLogout, user }) {
         setJoinLobbyInfo(data);
         setJoinCode(inviteCode);
         setLobbyMode("join");
-        setJoinMessage(`${data.name} is open. Pick player or viewer and join.`);
+        setJoinMessage(`${data.name} is open. Your role will be assigned randomly.`);
       } catch {
         if (active) {
           setInviteNotice("Could not connect to the server.");
@@ -180,22 +183,6 @@ function Lobby({ handleLogout, user }) {
         }
 
         setJoinLobbyInfo(data);
-
-        setJoinRole((current) => {
-          if (data.player_count >= data.player_limit && current === "player") {
-            if (data.viewer_count < data.viewer_limit && data.viewer_limit > 0) {
-              return "viewer";
-            }
-          }
-
-          if (data.viewer_count >= data.viewer_limit && current === "viewer") {
-            if (data.player_count < data.player_limit) {
-              return "player";
-            }
-          }
-
-          return current;
-        });
       } catch {
         if (active) {
           setJoinLobbyInfo(null);
@@ -277,13 +264,6 @@ function Lobby({ handleLogout, user }) {
     setInviteNotice("");
   }
 
-  const playersFull = joinLobbyInfo
-    ? joinLobbyInfo.player_count >= joinLobbyInfo.player_limit
-    : false;
-  const viewersFull = joinLobbyInfo
-    ? joinLobbyInfo.viewer_count >= joinLobbyInfo.viewer_limit || joinLobbyInfo.viewer_limit <= 0
-    : false;
-
   async function submitJoinLobby(event) {
     event.preventDefault();
     const cleanCode = joinCode.trim().toUpperCase();
@@ -300,7 +280,7 @@ function Lobby({ handleLogout, user }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ role: joinRole }),
+        body: JSON.stringify({}),
       });
       const data = await response.json();
 
@@ -320,6 +300,8 @@ function Lobby({ handleLogout, user }) {
     const cleanLobbyName = lobbyName.trim().replace(/\s+/g, " ");
     const players = Number(playerLimit);
     const viewers = Number(viewerLimit);
+    const modeRounds = [typingRounds, clickingRounds, spacebarRounds].map(Number);
+    const seconds = Number(roundDuration);
 
     if (cleanLobbyName.length < 3 || cleanLobbyName.length > 32) {
       setCreateMessage("Lobby name must be 3 to 32 characters.");
@@ -336,6 +318,16 @@ function Lobby({ handleLogout, user }) {
       return;
     }
 
+    if (modeRounds.some((rounds) => !Number.isInteger(rounds) || rounds < 1 || rounds > 10)) {
+      setCreateMessage("Each game mode must have 1 to 10 rounds.");
+      return;
+    }
+
+    if (!Number.isInteger(seconds) || seconds < 5 || seconds > 300) {
+      setCreateMessage("Round time must be between 5 and 300 seconds.");
+      return;
+    }
+
     setCreateMessage("");
 
     try {
@@ -347,6 +339,10 @@ function Lobby({ handleLogout, user }) {
           name: cleanLobbyName,
           player_limit: players,
           viewer_limit: viewers,
+          typing_rounds: modeRounds[0],
+          clicking_rounds: modeRounds[1],
+          spacebar_rounds: modeRounds[2],
+          round_duration: seconds,
         }),
       });
       const data = await response.json();
@@ -364,6 +360,10 @@ function Lobby({ handleLogout, user }) {
         viewers: data.viewer_limit,
         playerCount: data.player_count,
         viewerCount: data.viewer_count,
+        typingRounds: data.typing_rounds,
+        clickingRounds: data.clicking_rounds,
+        spacebarRounds: data.spacebar_rounds,
+        roundDuration: data.round_duration,
       });
     } catch {
       setCreateMessage("Could not connect to the server.");
@@ -375,6 +375,10 @@ function Lobby({ handleLogout, user }) {
       code: createdInvite.code,
       name: createdInvite.name,
       role: "host",
+      typing_rounds: createdInvite.typingRounds,
+      clicking_rounds: createdInvite.clickingRounds,
+      spacebar_rounds: createdInvite.spacebarRounds,
+      round_duration: createdInvite.roundDuration,
     });
   }
 
@@ -475,19 +479,9 @@ function Lobby({ handleLogout, user }) {
               }}
               placeholder="A1B2C3"
             />
-            <label htmlFor="join-role">Join as</label>
-            <select
-              id="join-role"
-              value={joinRole}
-              onChange={(event) => setJoinRole(event.target.value)}
-            >
-              <option value="player" disabled={playersFull}>
-                Player
-              </option>
-              <option value="viewer" disabled={viewersFull}>
-                Viewer
-              </option>
-            </select>
+            <p className="random-role-note">
+              You will be randomly assigned as a player or viewer based on available spots.
+            </p>
             {joinLobbyInfo && (
               <p className="invite-meta">
                 {joinLobbyInfo.player_count} / {joinLobbyInfo.player_limit} players ·{" "}
@@ -550,6 +544,54 @@ function Lobby({ handleLogout, user }) {
               </div>
             </div>
 
+            <p className="settings-heading">Rounds per game mode</p>
+            <div className="setup-grid rounds-grid">
+              <div>
+                <label htmlFor="typing-rounds">Typing</label>
+                <input
+                  id="typing-rounds"
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={typingRounds}
+                  onChange={(event) => setTypingRounds(event.target.value)}
+                />
+              </div>
+              <div>
+                <label htmlFor="clicking-rounds">Clicking</label>
+                <input
+                  id="clicking-rounds"
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={clickingRounds}
+                  onChange={(event) => setClickingRounds(event.target.value)}
+                />
+              </div>
+              <div>
+                <label htmlFor="spacebar-rounds">Spacebar</label>
+                <input
+                  id="spacebar-rounds"
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={spacebarRounds}
+                  onChange={(event) => setSpacebarRounds(event.target.value)}
+                />
+              </div>
+              <div>
+                <label htmlFor="round-duration">Seconds each</label>
+                <input
+                  id="round-duration"
+                  type="number"
+                  min="5"
+                  max="300"
+                  value={roundDuration}
+                  onChange={(event) => setRoundDuration(event.target.value)}
+                />
+              </div>
+            </div>
+
             <div className="profile-actions">
               <button className="secondary-button" type="button" onClick={() => openLobbyMode("home")}>
                 Cancel
@@ -576,6 +618,10 @@ function Lobby({ handleLogout, user }) {
             <p className="invite-meta">
               {createdInvite.playerCount} / {createdInvite.players} players ·{" "}
               {createdInvite.viewerCount} / {createdInvite.viewers} viewers
+            </p>
+            <p className="invite-settings">
+              {createdInvite.typingRounds} typing · {createdInvite.clickingRounds} clicking ·{" "}
+              {createdInvite.spacebarRounds} spacebar · {createdInvite.roundDuration}s each
             </p>
             <button className="login-button" type="button" onClick={enterCreatedGame}>
               Continue to game

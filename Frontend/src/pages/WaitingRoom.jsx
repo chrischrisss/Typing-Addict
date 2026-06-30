@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import GameSequence from "./GameSequence";
 import { useLobbySocket } from "../hooks/useLobbySocket";
 
@@ -7,6 +7,7 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
   const [exiting, setExiting] = useState(false);
+  const [liveProgress, setLiveProgress] = useState(null);
 
   useEffect(() => {
     const phase = lobby.game?.phase;
@@ -64,7 +65,13 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
     },
     onGameState: (game) => {
       setLobby((current) => ({ ...current, game }));
+      setLiveProgress((current) => (
+        current?.round_index === game.round_index && game.phase === "running" ? current : null
+      ));
       setMessage("");
+    },
+    onGameProgress: (progress) => {
+      setLiveProgress(progress);
     },
     onClosed: (data) => {
       setExiting(true);
@@ -74,6 +81,17 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
       setMessage("Live connection interrupted. Retrying...");
     },
   });
+
+  const sendGameProgress = useCallback((progress) => {
+    fetch(`/lobbies/${lobby.code}/game/progress`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(progress),
+    }).catch(() => {
+      // The next throttled update retries automatically.
+    });
+  }, [lobby.code]);
 
   async function leaveLobby() {
     setLoading(true);
@@ -130,7 +148,9 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
         code={lobby.code}
         game={lobby.game}
         isViewer={lobby.role === "viewer"}
+        liveProgress={liveProgress}
         onLeave={leaveLobby}
+        onProgress={sendGameProgress}
         user={user}
       />
     );
@@ -192,10 +212,11 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
         <aside className="round-order-panel">
           <p className="status-kicker">Race order</p>
           <ol>
-            <li><span>01</span> Typing</li>
-            <li><span>02</span> Clicking</li>
-            <li><span>03</span> Spacebar</li>
+            <li><span>01</span> Typing × {lobby.typing_rounds || 1}</li>
+            <li><span>02</span> Clicking × {lobby.clicking_rounds || 1}</li>
+            <li><span>03</span> Spacebar × {lobby.spacebar_rounds || 1}</li>
           </ol>
+          <p className="round-duration-copy">{lobby.round_duration || 30} seconds per round</p>
           {isHost ? (
             <button className="login-button start-game-button" type="button" disabled={loading} onClick={startGame}>
               {loading ? "Starting..." : "Start game"}
