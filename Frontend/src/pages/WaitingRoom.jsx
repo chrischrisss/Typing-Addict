@@ -13,6 +13,7 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [exiting, setExiting] = useState(false);
   const [liveProgress, setLiveProgress] = useState(null);
   const progressTrailUpdate = useRef({ roundIndex: null, updatedAt: 0 });
+  const bidderGameStateUpdateAt = useRef(0);
   const isBidderView = lobby.role === "bidder"
     || lobby.bidders?.some((bidder) => bidder.user_id === user.user_id);
 
@@ -56,6 +57,9 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
         const game = await response.json();
         if (cancelled) {
           return;
+        }
+        if (isBidderView) {
+          bidderGameStateUpdateAt.current = Date.now();
         }
         setLobby((current) => ({ ...current, game }));
         updateProgressTrail(game.phase === "running" ? game.live_progress : null);
@@ -103,6 +107,16 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
       setMessage("");
     },
     onGameState: (game) => {
+      const now = Date.now();
+      if (
+        isBidderView
+        && now - bidderGameStateUpdateAt.current < BIDDER_GAME_STATE_INTERVAL_MS
+      ) {
+        return;
+      }
+      if (isBidderView) {
+        bidderGameStateUpdateAt.current = now;
+      }
       setLobby((current) => ({ ...current, game }));
       updateProgressTrail(game.phase === "running" ? game.live_progress : null);
       setMessage("");
