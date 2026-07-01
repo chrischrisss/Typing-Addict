@@ -7,6 +7,7 @@ const TITLES = {
 };
 
 const formatMoney = (value) => `$${Number(value || 0).toFixed(2)}`;
+const PROGRESS_SEND_INTERVAL_MS = 500;
 
 const KEYBOARD_ROWS = [
   [
@@ -136,7 +137,10 @@ function GameSequence({ code, game, isBidder, liveProgress, onLeave, onProgress,
       onProgress?.(queuedProgress.current);
       queuedProgress.current = null;
     };
-    const delay = Math.max(0, 100 - (Date.now() - lastProgressSent.current));
+    const delay = Math.max(
+      0,
+      PROGRESS_SEND_INTERVAL_MS - (Date.now() - lastProgressSent.current),
+    );
 
     if (delay === 0) {
       send();

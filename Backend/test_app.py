@@ -7,7 +7,14 @@ from datetime import timedelta
 TEST_DIRECTORY = tempfile.mkdtemp(prefix="typing-addict-tests-")
 os.environ["DATABASE_URL"] = f"sqlite:///{os.path.join(TEST_DIRECTORY, 'test.sqlite3')}"
 
-from app import INSTRUCTION_DURATION, LIVE_PROGRESS, app, socketio, utc_now  # noqa: E402
+from app import (  # noqa: E402
+    INSTRUCTION_DURATION,
+    LIVE_PROGRESS,
+    app,
+    socketio,
+    tick_active_games,
+    utc_now,
+)
 from models import Bet, GameControl, db  # noqa: E402
 
 
@@ -93,10 +100,17 @@ class LobbyFlowTest(unittest.TestCase):
             "typed": prompt[:typed_length],
         })
         self.assertEqual(progress_response.status_code, 200)
+        self.assertFalse(any(
+            event["name"] in ("game:state", "game:progress")
+            for event in bidder_socket.get_received()
+        ))
+        with app.app_context():
+            tick_active_games()
         bidder_events = bidder_socket.get_received()
-        progress_event = next(event for event in bidder_events if event["name"] == "game:progress")
-        self.assertEqual(progress_event["args"][0]["players"][0]["user_id"], player_id)
-        first_progress = progress_event["args"][0]["players"][0]["progress"]
+        state_event = next(event for event in bidder_events if event["name"] == "game:state")
+        first_live_progress = state_event["args"][0]["live_progress"]
+        self.assertEqual(first_live_progress["players"][0]["user_id"], player_id)
+        first_progress = first_live_progress["players"][0]["progress"]
         self.assertGreater(first_progress, 0)
         next_response = player.post(f"/lobbies/{code}/game/progress", json={
             "round_index": 0,
@@ -104,9 +118,16 @@ class LobbyFlowTest(unittest.TestCase):
             "typed": prompt,
         })
         self.assertEqual(next_response.status_code, 200)
+        self.assertFalse(any(
+            event["name"] in ("game:state", "game:progress")
+            for event in bidder_socket.get_received()
+        ))
+        with app.app_context():
+            tick_active_games()
         next_events = bidder_socket.get_received()
-        next_progress = next(event for event in next_events if event["name"] == "game:progress")
-        self.assertGreater(next_progress["args"][0]["players"][0]["progress"], first_progress)
+        next_state = next(event for event in next_events if event["name"] == "game:state")
+        next_progress = next_state["args"][0]["live_progress"]
+        self.assertGreater(next_progress["players"][0]["progress"], first_progress)
         polled_progress = bidder.get(f"/lobbies/{code}/game").get_json()["live_progress"]
         self.assertEqual(polled_progress["players"][0]["progress"], 100)
         self.assertFalse(any(event["name"] == "game:progress" for event in player_socket.get_received()))

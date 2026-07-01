@@ -30,6 +30,7 @@ START_COUNTDOWN_DURATION = 3
 INSTRUCTION_DURATION = 30
 BETTING_DURATION = 20
 RESULT_GRACE_DURATION = 2
+GAME_TICK_INTERVAL_SECONDS = 1
 STARTING_BALANCE_CENTS = 100000
 REBUY_CENTS = 5000
 LIVE_PROGRESS = {}
@@ -785,14 +786,6 @@ def live_progress_payload(lobby, session, control):
     }
 
 
-def broadcast_live_progress(lobby, session, control):
-    socketio.emit(
-        "game:progress",
-        live_progress_payload(lobby, session, control),
-        room=bidder_room(lobby.code),
-    )
-
-
 def record_live_progress(lobby, user_id, data):
     if lobby_membership(lobby.id, user_id) != "player":
         return None
@@ -877,10 +870,6 @@ def handle_connect():
     game = game_payload(lobby)
     if game:
         emit("game:state", game)
-        if role == "bidder":
-            session = GameSession.query.filter_by(lobby_id=lobby.id).first()
-            control = game_control(session)
-            emit("game:progress", live_progress_payload(lobby, session, control))
     return True
 
 
@@ -900,8 +889,6 @@ def handle_game_progress(data):
     recorded = record_live_progress(lobby, user_id, data)
     if not recorded:
         return
-    session, control = recorded
-    broadcast_live_progress(lobby, session, control)
 
 
 def tick_active_games():
@@ -917,12 +904,11 @@ def tick_active_games():
             continue
         sync_game_control(lobby, session, control)
         broadcast_game(lobby, session)
-        broadcast_live_progress(lobby, session, control)
 
 
 def game_tick_loop():
     while True:
-        socketio.sleep(0.5)
+        socketio.sleep(GAME_TICK_INTERVAL_SECONDS)
         with app.app_context():
             if app.config.get("TESTING"):
                 continue
@@ -1467,10 +1453,7 @@ def update_game_progress(code):
     if not recorded:
         return jsonify({"message": "That round is not accepting progress."}), 409
 
-    session, control = recorded
-    payload = live_progress_payload(lobby, session, control)
-    socketio.emit("game:progress", payload, room=bidder_room(lobby.code))
-    return jsonify(payload)
+    return jsonify({"recorded": True})
 
 
 @app.post("/lobbies/<code>/game/submit")

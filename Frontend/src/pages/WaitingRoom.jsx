@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import GameSequence from "./GameSequence";
 import { useLobbySocket } from "../hooks/useLobbySocket";
 
+const FALLBACK_POLL_INTERVAL_MS = 5000;
+
 function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [lobby, setLobby] = useState(initialLobby);
   const [message, setMessage] = useState("");
@@ -36,7 +38,9 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
     }
 
     pollGameState();
-    const intervalId = window.setInterval(pollGameState, 500);
+    // Socket.IO supplies normal live updates. This slower poll only recovers
+    // state if a socket message is missed during a reconnect.
+    const intervalId = window.setInterval(pollGameState, FALLBACK_POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
@@ -65,9 +69,7 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
     },
     onGameState: (game) => {
       setLobby((current) => ({ ...current, game }));
-      setLiveProgress((current) => (
-        current?.round_index === game.round_index && game.phase === "running" ? current : null
-      ));
+      setLiveProgress(game.phase === "running" ? game.live_progress : null);
       setMessage("");
     },
     onGameProgress: (progress) => {
