@@ -3,7 +3,7 @@ import GameSequence from "./GameSequence";
 import { useLobbySocket } from "../hooks/useLobbySocket";
 
 const GAME_STATE_INTERVAL_MS = 1000;
-const BIDDER_GAME_STATE_INTERVAL_MS = 100;
+const BIDDER_GAME_STATE_INTERVAL_MS = 5000;
 const PROGRESS_TRAIL_INTERVAL_MS = 5000;
 
 function WaitingRoom({ lobby: initialLobby, onExit, user }) {
