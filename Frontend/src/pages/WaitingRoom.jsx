@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import GameSequence from "./GameSequence";
 import { useLobbySocket } from "../hooks/useLobbySocket";
 
-const FALLBACK_POLL_INTERVAL_MS = 5000;
+const GAME_STATE_INTERVAL_MS = 1000;
+const PROGRESS_TRAIL_INTERVAL_MS = 5000;
 
 function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [lobby, setLobby] = useState(initialLobby);
@@ -10,6 +11,28 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [loading, setLoading] = useState(false);
   const [exiting, setExiting] = useState(false);
   const [liveProgress, setLiveProgress] = useState(null);
+  const progressTrailUpdate = useRef({ roundIndex: null, updatedAt: 0 });
+
+  const updateProgressTrail = useCallback((progress) => {
+    if (!progress) {
+      progressTrailUpdate.current = { roundIndex: null, updatedAt: 0 };
+      setLiveProgress(null);
+      return;
+    }
+
+    const now = Date.now();
+    const previous = progressTrailUpdate.current;
+    if (
+      previous.roundIndex !== progress.round_index
+      || now - previous.updatedAt >= PROGRESS_TRAIL_INTERVAL_MS
+    ) {
+      progressTrailUpdate.current = {
+        roundIndex: progress.round_index,
+        updatedAt: now,
+      };
+      setLiveProgress(progress);
+    }
+  }, []);
 
   useEffect(() => {
     const phase = lobby.game?.phase;
@@ -32,20 +55,20 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
           return;
         }
         setLobby((current) => ({ ...current, game }));
+        updateProgressTrail(game.phase === "running" ? game.live_progress : null);
       } catch {
         // Socket updates or the next poll will retry.
       }
     }
 
     pollGameState();
-    // Socket.IO supplies normal live updates. This slower poll only recovers
-    // state if a socket message is missed during a reconnect.
-    const intervalId = window.setInterval(pollGameState, FALLBACK_POLL_INTERVAL_MS);
+    // Keep timers and phase transitions smooth even while Socket.IO reconnects.
+    const intervalId = window.setInterval(pollGameState, GAME_STATE_INTERVAL_MS);
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [lobby.code, lobby.game?.phase, lobby.game?.round_index]);
+  }, [lobby.code, lobby.game?.phase, lobby.game?.round_index, updateProgressTrail]);
 
   useLobbySocket(lobby.code, {
     onLobbyUpdated: (data) => {
@@ -69,11 +92,11 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
     },
     onGameState: (game) => {
       setLobby((current) => ({ ...current, game }));
-      setLiveProgress(game.phase === "running" ? game.live_progress : null);
+      updateProgressTrail(game.phase === "running" ? game.live_progress : null);
       setMessage("");
     },
     onGameProgress: (progress) => {
-      setLiveProgress(progress);
+      updateProgressTrail(progress);
     },
     onClosed: (data) => {
       setExiting(true);
