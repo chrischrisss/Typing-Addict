@@ -414,9 +414,10 @@ def round_winning_player_ids(lobby, session, round_index):
         game_session_id=session.id,
         round_index=round_index,
     ).all()
-    scores = {user_id: 0 for user_id in player_ids}
+    scores = {}
     for result in results:
-        scores[result.user_id] = result.score
+        if result.user_id in player_ids:
+            scores[result.user_id] = result.score
     if not scores:
         return set()
     top_score = max(scores.values())
@@ -434,11 +435,32 @@ def settle_round_bets(lobby, session, control):
     winning_player_ids = round_winning_player_ids(lobby, session, control.round_index)
     winning_bets = [bet for bet in bets if bet.player_user_id in winning_player_ids]
 
+    payouts = {}
+    if winning_bets:
+        pot_cents = sum(bet.amount_cents for bet in bets)
+        winning_stakes_cents = sum(bet.amount_cents for bet in winning_bets)
+        payout_rows = []
+        paid_cents = 0
+        for bet in winning_bets:
+            payout_cents, remainder = divmod(
+                pot_cents * bet.amount_cents,
+                winning_stakes_cents,
+            )
+            payouts[bet.id] = payout_cents
+            paid_cents += payout_cents
+            payout_rows.append((remainder, bet.id))
+
+        # Integer-cent division can leave at most one cent per winning bid.
+        # Give those cents to the largest fractional shares without exceeding
+        # the actual pot.
+        for _, bet_id in sorted(payout_rows, key=lambda row: (-row[0], row[1]))[
+            :pot_cents - paid_cents
+        ]:
+            payouts[bet_id] += 1
+
     for bet in bets:
         bet.won = bet in winning_bets
-        # The stake was removed when the bid was placed. A correct bid gets the
-        # stake back plus an equal profit; every other finishing position loses.
-        bet.payout_cents = bet.amount_cents * 2 if bet.won else 0
+        bet.payout_cents = payouts.get(bet.id, 0)
         if bet.won:
             bidder = Bidder.query.filter_by(
                 lobby_id=lobby.id,
@@ -1479,11 +1501,9 @@ def submit_game_result(code):
     if (
         submitted_round < 0
         or submitted_round >= len(game_order)
-        or submitted_round > state["round_index"]
-        or (
-            submitted_round == state["round_index"]
-            and state["phase"] not in ("running", "settling", "leaderboard")
-        )
+        or submitted_round != state["round_index"]
+        or state["phase"] not in ("running", "settling")
+        or control.betting_settled
     ):
         return jsonify({"message": "That round is not accepting results."}), 409
 

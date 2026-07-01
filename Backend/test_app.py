@@ -362,10 +362,10 @@ class LobbyFlowTest(unittest.TestCase):
         self.assertEqual(game["betting"]["pot"], 1300)
         self.assertEqual({winner["user_id"] for winner in game["betting"]["winners"]}, {first_id, second_id})
         payouts = {winner["user_id"]: winner["payout"] for winner in game["betting"]["winners"]}
-        self.assertEqual(payouts, {first_id: 200, second_id: 400})
+        self.assertEqual(payouts, {first_id: 433.33, second_id: 866.67})
         balances = {row["user_id"]: row["balance"] for row in game["betting"]["bidders"]}
-        self.assertEqual(balances[first_id], 1100)
-        self.assertEqual(balances[second_id], 1200)
+        self.assertEqual(balances[first_id], 1333.33)
+        self.assertEqual(balances[second_id], 1666.67)
         self.assertEqual(balances[losing_id], 0)
         with app.app_context():
             losing_bet = Bet.query.filter_by(bidder_user_id=losing_id).one()
@@ -383,12 +383,64 @@ class LobbyFlowTest(unittest.TestCase):
         }
         self.assertEqual(next_balances[losing_id], 50)
 
+        # A sole correct bidder can only receive the money available in the pot.
+        self.assertEqual(losing_bidder.post(f"/lobbies/{code}/game/bets", json={
+            "player_user_id": player_id,
+            "amount": "50.00",
+        }).status_code, 201)
         with app.app_context():
             control = GameControl.query.one()
-            control.round_index = 2
-            control.phase = "leaderboard"
-            control.betting_settled = True
+            control.phase = "running"
+            control.round_started_at = utc_now()
             db.session.commit()
+
+        self.assertEqual(host.post(f"/lobbies/{code}/game/submit", json={
+            "round_index": 1,
+            "count": 0,
+        }).status_code, 201)
+        self.assertEqual(player.post(f"/lobbies/{code}/game/submit", json={
+            "round_index": 1,
+            "count": 100,
+        }).status_code, 201)
+        solo_result = host.get(f"/lobbies/{code}/game").get_json()
+        self.assertEqual(solo_result["betting"]["pot"], 50)
+        self.assertEqual(solo_result["betting"]["winners"][0]["payout"], 50)
+        solo_balances = {
+            row["user_id"]: row["balance"] for row in solo_result["betting"]["bidders"]
+        }
+        self.assertEqual(solo_balances[losing_id], 50)
+
+        # A player without a submitted result is not a winner, and a late
+        # result cannot alter betting after settlement.
+        third_round = host.post(f"/lobbies/{code}/next").get_json()
+        self.assertEqual(third_round["phase"], "betting")
+        self.assertEqual(losing_bidder.post(f"/lobbies/{code}/game/bets", json={
+            "player_user_id": created.get_json()["host_user_id"],
+            "amount": "50.00",
+        }).status_code, 201)
+        with app.app_context():
+            control = GameControl.query.one()
+            control.phase = "running"
+            control.round_started_at = utc_now()
+            db.session.commit()
+
+        self.assertEqual(player.post(f"/lobbies/{code}/game/submit", json={
+            "round_index": 2,
+            "count": 100,
+        }).status_code, 201)
+        with app.app_context():
+            control = GameControl.query.one()
+            control.phase = "settling"
+            control.round_started_at = utc_now() - timedelta(seconds=1)
+            db.session.commit()
+
+        settled = host.get(f"/lobbies/{code}/game").get_json()
+        self.assertEqual(settled["phase"], "leaderboard")
+        self.assertEqual(settled["betting"]["winners"], [])
+        self.assertEqual(host.post(f"/lobbies/{code}/game/submit", json={
+            "round_index": 2,
+            "count": 1000,
+        }).status_code, 409)
 
         finished = host.post(f"/lobbies/{code}/next").get_json()
         self.assertEqual(finished["phase"], "finished")

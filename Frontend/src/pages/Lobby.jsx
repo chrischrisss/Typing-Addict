@@ -265,6 +265,20 @@ function Lobby({ handleLogout, user }) {
     setInviteNotice("");
   }
 
+  async function syncInGameName() {
+    if (!savedName || savedName === user.display_name) {
+      return true;
+    }
+
+    const response = await fetch("/me/profile", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ display_name: savedName }),
+    });
+    return response.ok;
+  }
+
   async function submitJoinLobby(event) {
     event.preventDefault();
     const cleanCode = joinCode.trim().toUpperCase();
@@ -277,6 +291,10 @@ function Lobby({ handleLogout, user }) {
     setJoinMessage("");
 
     try {
+      if (!await syncInGameName()) {
+        setJoinMessage("Could not save your in-game name.");
+        return;
+      }
       const response = await fetch(`/lobbies/${cleanCode}/join`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -338,6 +356,10 @@ function Lobby({ handleLogout, user }) {
     setCreateMessage("");
 
     try {
+      if (!await syncInGameName()) {
+        setCreateMessage("Could not save your in-game name.");
+        return;
+      }
       const response = await fetch("/lobbies", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

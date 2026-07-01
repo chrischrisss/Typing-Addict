@@ -358,7 +358,7 @@ function GameSequence({ code, game, isBidder, liveProgress, onLeave, onProgress,
             <p className="instruction-intro">You begin with $1,000 and bid on who will finish first each round.</p>
             <ol>
               <li>During the 15-second bidding window, select one player and enter any amount within your balance.</li>
-              <li>Your bid locks immediately. A first-place pick wins the amount bid; every other place loses it.</li>
+              <li>Your bid locks immediately. Correct bids split the available pot by wager size; every other place loses.</li>
               <li>Watch the race live. Your updated balance and bidding winners appear after the round.</li>
               <li>If your balance reaches $0, you receive $50 when the next round begins.</li>
             </ol>
