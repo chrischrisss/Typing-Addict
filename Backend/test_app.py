@@ -7,8 +7,8 @@ from datetime import timedelta
 TEST_DIRECTORY = tempfile.mkdtemp(prefix="typing-addict-tests-")
 os.environ["DATABASE_URL"] = f"sqlite:///{os.path.join(TEST_DIRECTORY, 'test.sqlite3')}"
 
-from app import LIVE_PROGRESS, app, socketio, utc_now  # noqa: E402
-from models import GameControl, db  # noqa: E402
+from app import INSTRUCTION_DURATION, LIVE_PROGRESS, app, socketio, utc_now  # noqa: E402
+from models import Bet, GameControl, db  # noqa: E402
 
 
 class LobbyFlowTest(unittest.TestCase):
@@ -253,7 +253,7 @@ class LobbyFlowTest(unittest.TestCase):
         self.assertEqual(lobby["player_limit"], 4)
         self.assertEqual(lobby["bidder_limit"], 12)
 
-    def test_bidding_pot_split_and_zero_balance_rebuy(self):
+    def test_bids_pay_only_first_place_and_store_player_amount(self):
         host = app.test_client()
         player = app.test_client()
         first_bidder = app.test_client()
@@ -283,7 +283,7 @@ class LobbyFlowTest(unittest.TestCase):
 
         started = host.post(f"/lobbies/{code}/start").get_json()
         self.assertEqual(started["phase"], "instructions")
-        self.assertEqual(started["seconds_remaining"], 20)
+        self.assertEqual(started["seconds_remaining"], INSTRUCTION_DURATION)
         self.assertTrue(all(row["balance"] == 1000 for row in started["betting"]["bidders"]))
         self.assertEqual(first_bidder.post(f"/lobbies/{code}/game/bets", json={
             "player_user_id": player_id,
@@ -311,6 +311,32 @@ class LobbyFlowTest(unittest.TestCase):
             "amount": "1000.00",
         }).status_code, 201)
 
+        placed = host.get(f"/lobbies/{code}/game").get_json()["betting"]["bets"]
+        self.assertEqual(
+            {
+                (bet["bidder_user_id"], bet["player_user_id"], bet["amount"])
+                for bet in placed
+            },
+            {
+                (first_id, player_id, 100),
+                (second_id, player_id, 200),
+                (losing_id, created.get_json()["host_user_id"], 1000),
+            },
+        )
+        with app.app_context():
+            stored_bets = Bet.query.order_by(Bet.bidder_user_id).all()
+            self.assertEqual(
+                {
+                    (bet.bidder_user_id, bet.player_user_id, bet.amount_cents)
+                    for bet in stored_bets
+                },
+                {
+                    (first_id, player_id, 10000),
+                    (second_id, player_id, 20000),
+                    (losing_id, created.get_json()["host_user_id"], 100000),
+                },
+            )
+
         with app.app_context():
             control = GameControl.query.one()
             control.phase = "running"
@@ -335,14 +361,19 @@ class LobbyFlowTest(unittest.TestCase):
         self.assertEqual(game["phase"], "leaderboard")
         self.assertEqual(game["betting"]["pot"], 1300)
         self.assertEqual({winner["user_id"] for winner in game["betting"]["winners"]}, {first_id, second_id})
-        self.assertTrue(all(winner["payout"] == 650 for winner in game["betting"]["winners"]))
+        payouts = {winner["user_id"]: winner["payout"] for winner in game["betting"]["winners"]}
+        self.assertEqual(payouts, {first_id: 200, second_id: 400})
         balances = {row["user_id"]: row["balance"] for row in game["betting"]["bidders"]}
-        self.assertEqual(balances[first_id], 1550)
-        self.assertEqual(balances[second_id], 1450)
+        self.assertEqual(balances[first_id], 1100)
+        self.assertEqual(balances[second_id], 1200)
         self.assertEqual(balances[losing_id], 0)
+        with app.app_context():
+            losing_bet = Bet.query.filter_by(bidder_user_id=losing_id).one()
+            self.assertFalse(losing_bet.won)
+            self.assertEqual(losing_bet.payout_cents, 0)
         self.assertEqual(
             [row["user_id"] for row in game["bidder_standings"]],
-            [first_id, second_id, losing_id],
+            [second_id, first_id, losing_id],
         )
 
         next_round = host.post(f"/lobbies/{code}/next").get_json()
@@ -363,7 +394,7 @@ class LobbyFlowTest(unittest.TestCase):
         self.assertEqual(finished["phase"], "finished")
         self.assertEqual(
             [row["user_id"] for row in finished["bidder_standings"]],
-            [first_id, second_id, losing_id],
+            [second_id, first_id, losing_id],
         )
 
         self.assertEqual(host.delete(f"/lobbies/{code}/leave").status_code, 200)

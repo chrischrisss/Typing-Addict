@@ -433,18 +433,19 @@ def settle_round_bets(lobby, session, control):
     ).all()
     winning_player_ids = round_winning_player_ids(lobby, session, control.round_index)
     winning_bets = [bet for bet in bets if bet.player_user_id in winning_player_ids]
-    payout_cents = sum(bet.amount_cents for bet in bets) // len(winning_bets) if winning_bets else 0
 
     for bet in bets:
         bet.won = bet in winning_bets
-        bet.payout_cents = payout_cents if bet.won else 0
+        # The stake was removed when the bid was placed. A correct bid gets the
+        # stake back plus an equal profit; every other finishing position loses.
+        bet.payout_cents = bet.amount_cents * 2 if bet.won else 0
         if bet.won:
             bidder = Bidder.query.filter_by(
                 lobby_id=lobby.id,
                 user_id=bet.bidder_user_id,
             ).first()
             if bidder:
-                bidder.balance_cents += payout_cents
+                bidder.balance_cents += bet.payout_cents
 
     control.betting_settled = True
 
@@ -462,11 +463,21 @@ def betting_payload(lobby, session, control):
         if control.betting_settled
         else set()
     )
+    placed_bets = [
+        {
+            "bidder_user_id": bet.bidder_user_id,
+            "player_user_id": bet.player_user_id,
+            "player_name": player_names.get(bet.player_user_id, "Former player (left)"),
+            "amount": bet.amount_cents / 100,
+        }
+        for bet in bets
+    ]
 
     return {
         "duration": BETTING_DURATION,
         "pot": sum(bet.amount_cents for bet in bets) / 100,
         "bettor_ids": [bet.bidder_user_id for bet in bets],
+        "bets": placed_bets,
         "bidders": members["bidders"],
         "winning_players": [
             {

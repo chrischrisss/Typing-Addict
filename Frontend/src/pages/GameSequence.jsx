@@ -358,7 +358,7 @@ function GameSequence({ code, game, isBidder, liveProgress, onLeave, onProgress,
             <p className="instruction-intro">You begin with $1,000 and bid on who will finish first each round.</p>
             <ol>
               <li>During the 15-second bidding window, select one player and enter any amount within your balance.</li>
-              <li>Your bid locks immediately. If your player wins, correct bidders split the full pot equally.</li>
+              <li>Your bid locks immediately. A first-place pick wins the amount bid; every other place loses it.</li>
               <li>Watch the race live. Your updated balance and bidding winners appear after the round.</li>
               <li>If your balance reaches $0, you receive $50 when the next round begins.</li>
             </ol>
@@ -382,6 +382,7 @@ function GameSequence({ code, game, isBidder, liveProgress, onLeave, onProgress,
   if (game.phase === "betting") {
     const bidder = game.betting?.bidders?.find((entry) => entry.user_id === user.user_id);
     const alreadyBet = game.betting?.bettor_ids?.includes(user.user_id);
+    const placedBet = game.betting?.bets?.find((entry) => entry.bidder_user_id === user.user_id);
     return (
       <main className="game-stage betting-stage page-enter">
         <header className="game-header">
@@ -400,7 +401,9 @@ function GameSequence({ code, game, isBidder, liveProgress, onLeave, onProgress,
               <strong>{formatMoney(bidder?.balance)}</strong>
             </div>
             {alreadyBet ? (
-              <p className="bet-locked">Your bet is locked in for this round.</p>
+              <p className="bet-locked">
+                Your {formatMoney(placedBet?.amount)} bid on {placedBet?.player_name || "this player"} is locked in.
+              </p>
             ) : (
               <>
                 <span className="betting-field-label">Choose a player</span>
@@ -504,7 +507,7 @@ function GameSequence({ code, game, isBidder, liveProgress, onLeave, onProgress,
             <div className="betting-winner-list">
               {game.betting.winners.map((winner) => (
                 <p key={winner.user_id}>
-                  <strong>{winner.name}</strong> won {formatMoney(winner.payout)} betting on {winner.player_name}.
+                  <strong>{winner.name}</strong> received {formatMoney(winner.payout)} betting on {winner.player_name}.
                 </p>
               ))}
             </div>
