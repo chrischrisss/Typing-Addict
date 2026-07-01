@@ -2,7 +2,6 @@ import os
 import tempfile
 import unittest
 from datetime import timedelta
-from unittest.mock import patch
 
 
 TEST_DIRECTORY = tempfile.mkdtemp(prefix="typing-addict-tests-")
@@ -29,25 +28,26 @@ class LobbyFlowTest(unittest.TestCase):
     def test_waiting_room_host_transfer_and_three_rounds(self):
         host = app.test_client()
         player = app.test_client()
-        viewer = app.test_client()
+        bidder = app.test_client()
         self.register(host, "host-user", "Host Racer")
         self.register(player, "player-user", "Player Two")
-        self.register(viewer, "viewer-user", "Race Watcher")
+        self.register(bidder, "bidder-user", "Race Bidder")
 
         created = host.post(
             "/lobbies",
-            json={"name": "Test room", "player_limit": 4, "viewer_limit": 2},
+            json={"name": "Test room", "lobby_limit": 4, "player_limit": 2, "bidder_limit": 2},
         )
         self.assertEqual(created.status_code, 201)
         lobby = created.get_json()
         code = lobby["code"]
         host_id = lobby["host_user_id"]
 
-        with patch("app.random.choice", side_effect=["player", "viewer"]):
-            joined = player.post(f"/lobbies/{code}/join", json={})
-            self.assertEqual(joined.status_code, 200)
-            player_id = next(row["user_id"] for row in joined.get_json()["players"] if row["name"] == "Player Two")
-            self.assertEqual(viewer.post(f"/lobbies/{code}/join", json={}).status_code, 200)
+        joined = player.post(f"/lobbies/{code}/join", json={})
+        self.assertEqual(joined.status_code, 200)
+        player_id = next(row["user_id"] for row in joined.get_json()["players"] if row["name"] == "Player Two")
+        bidder_joined = bidder.post(f"/lobbies/{code}/join", json={})
+        self.assertEqual(bidder_joined.status_code, 200)
+        self.assertEqual(bidder_joined.get_json()["role"], "bidder")
 
         roster = host.get(f"/lobbies/{code}").get_json()
         self.assertEqual({row["name"] for row in roster["players"]}, {"Host Racer", "Player Two"})
@@ -55,8 +55,7 @@ class LobbyFlowTest(unittest.TestCase):
 
         kicked = host.delete(f"/lobbies/{code}/players/{player_id}")
         self.assertEqual(kicked.status_code, 200)
-        with patch("app.random.choice", return_value="player"):
-            self.assertEqual(player.post(f"/lobbies/{code}/join", json={}).status_code, 200)
+        self.assertEqual(player.post(f"/lobbies/{code}/join", json={}).status_code, 200)
 
         left = host.delete(f"/lobbies/{code}/leave")
         self.assertEqual(left.status_code, 200)
@@ -79,13 +78,13 @@ class LobbyFlowTest(unittest.TestCase):
             flask_test_client=player,
             query_string=f"lobby={code}",
         )
-        viewer_socket = socketio.test_client(
+        bidder_socket = socketio.test_client(
             app,
-            flask_test_client=viewer,
+            flask_test_client=bidder,
             query_string=f"lobby={code}",
         )
         player_socket.get_received()
-        viewer_socket.get_received()
+        bidder_socket.get_received()
         prompt = started.get_json()["prompt"]
         typed_length = max(1, len(prompt) // 2)
         progress_response = player.post(f"/lobbies/{code}/game/progress", json={
@@ -94,8 +93,8 @@ class LobbyFlowTest(unittest.TestCase):
             "typed": prompt[:typed_length],
         })
         self.assertEqual(progress_response.status_code, 200)
-        viewer_events = viewer_socket.get_received()
-        progress_event = next(event for event in viewer_events if event["name"] == "game:progress")
+        bidder_events = bidder_socket.get_received()
+        progress_event = next(event for event in bidder_events if event["name"] == "game:progress")
         self.assertEqual(progress_event["args"][0]["players"][0]["user_id"], player_id)
         first_progress = progress_event["args"][0]["players"][0]["progress"]
         self.assertGreater(first_progress, 0)
@@ -105,14 +104,14 @@ class LobbyFlowTest(unittest.TestCase):
             "typed": prompt,
         })
         self.assertEqual(next_response.status_code, 200)
-        next_events = viewer_socket.get_received()
+        next_events = bidder_socket.get_received()
         next_progress = next(event for event in next_events if event["name"] == "game:progress")
         self.assertGreater(next_progress["args"][0]["players"][0]["progress"], first_progress)
-        polled_progress = viewer.get(f"/lobbies/{code}/game").get_json()["live_progress"]
+        polled_progress = bidder.get(f"/lobbies/{code}/game").get_json()["live_progress"]
         self.assertEqual(polled_progress["players"][0]["progress"], 100)
         self.assertFalse(any(event["name"] == "game:progress" for event in player_socket.get_received()))
         player_socket.disconnect()
-        viewer_socket.disconnect()
+        bidder_socket.disconnect()
 
         typed = player.post(
             f"/lobbies/{code}/game/submit",
@@ -153,18 +152,25 @@ class LobbyFlowTest(unittest.TestCase):
         self.assertEqual(finished.status_code, 200)
         self.assertEqual(finished.get_json()["phase"], "finished")
 
-    def test_random_roles_and_custom_round_settings(self):
+    def test_player_roles_fill_before_bidders_and_custom_round_settings(self):
         host = app.test_client()
         first_guest = app.test_client()
         second_guest = app.test_client()
+        third_guest = app.test_client()
+        fourth_guest = app.test_client()
+        fifth_guest = app.test_client()
         self.register(host, "settings-host", "Settings Host")
         self.register(first_guest, "settings-one", "Guest One")
         self.register(second_guest, "settings-two", "Guest Two")
+        self.register(third_guest, "settings-three", "Guest Three")
+        self.register(fourth_guest, "settings-four", "Guest Four")
+        self.register(fifth_guest, "settings-five", "Guest Five")
 
         created = host.post("/lobbies", json={
             "name": "Custom race",
+            "lobby_limit": 5,
             "player_limit": 4,
-            "viewer_limit": 4,
+            "bidder_limit": 4,
             "typing_rounds": 2,
             "clicking_rounds": 3,
             "spacebar_rounds": 1,
@@ -173,12 +179,17 @@ class LobbyFlowTest(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         code = created.get_json()["code"]
 
-        with patch("app.random.choice", side_effect=["viewer", "player"]):
-            viewer_join = first_guest.post(f"/lobbies/{code}/join", json={"role": "player"})
-            player_join = second_guest.post(f"/lobbies/{code}/join", json={"role": "viewer"})
+        first_join = first_guest.post(f"/lobbies/{code}/join", json={"role": "bidder"})
+        second_join = second_guest.post(f"/lobbies/{code}/join", json={"role": "bidder"})
+        third_join = third_guest.post(f"/lobbies/{code}/join", json={"role": "bidder"})
+        fourth_join = fourth_guest.post(f"/lobbies/{code}/join", json={"role": "player"})
+        fifth_join = fifth_guest.post(f"/lobbies/{code}/join", json={})
 
-        self.assertEqual(viewer_join.get_json()["role"], "viewer")
-        self.assertEqual(player_join.get_json()["role"], "player")
+        self.assertEqual(first_join.get_json()["role"], "player")
+        self.assertEqual(second_join.get_json()["role"], "player")
+        self.assertEqual(third_join.get_json()["role"], "player")
+        self.assertEqual(fourth_join.get_json()["role"], "bidder")
+        self.assertEqual(fifth_join.status_code, 409)
 
         started = host.post(f"/lobbies/{code}/start")
         self.assertEqual(started.status_code, 201)
@@ -188,6 +199,183 @@ class LobbyFlowTest(unittest.TestCase):
         ])
         self.assertEqual(game["round_duration"], 45)
 
+    def test_departed_player_keeps_name_in_leaderboard(self):
+        host = app.test_client()
+        player = app.test_client()
+        self.register(host, "departure-host", "Host Racer")
+        self.register(player, "departure-player", "Bing Bong")
+
+        created = host.post("/lobbies", json={
+            "name": "Departure race",
+            "lobby_limit": 3,
+            "player_limit": 2,
+            "bidder_limit": 1,
+        })
+        code = created.get_json()["code"]
+        joined = player.post(f"/lobbies/{code}/join", json={})
+        player_id = next(
+            row["user_id"] for row in joined.get_json()["players"] if row["name"] == "Bing Bong"
+        )
+        started = host.post(f"/lobbies/{code}/start")
+
+        with app.app_context():
+            control = GameControl.query.one()
+            control.phase = "running"
+            control.round_started_at = utc_now() - timedelta(seconds=5)
+            db.session.commit()
+
+        submitted = player.post(f"/lobbies/{code}/game/submit", json={
+            "round_index": 0,
+            "typed": started.get_json()["prompt"],
+        })
+        self.assertEqual(submitted.status_code, 201)
+        self.assertEqual(player.delete(f"/lobbies/{code}/leave").status_code, 200)
+
+        game = host.get(f"/lobbies/{code}/game").get_json()
+        departed = next(row for row in game["standings"] if row["user_id"] == player_id)
+        self.assertEqual(departed["name"], "Bing Bong (left)")
+        departed_result = next(row for row in game["results"] if row["user_id"] == player_id)
+        self.assertEqual(departed_result["name"], "Bing Bong (left)")
+
+    def test_legacy_lobby_payload_is_still_accepted(self):
+        host = app.test_client()
+        self.register(host, "legacy-host", "Legacy Host")
+
+        created = host.post("/lobbies", json={
+            "name": "Legacy room",
+            "player_limit": 4,
+            "viewer_limit": 12,
+        })
+
+        self.assertEqual(created.status_code, 201)
+        lobby = created.get_json()
+        self.assertEqual(lobby["lobby_limit"], 16)
+        self.assertEqual(lobby["player_limit"], 4)
+        self.assertEqual(lobby["bidder_limit"], 12)
+
+    def test_bidding_pot_split_and_zero_balance_rebuy(self):
+        host = app.test_client()
+        player = app.test_client()
+        first_bidder = app.test_client()
+        second_bidder = app.test_client()
+        losing_bidder = app.test_client()
+        self.register(host, "bet-host", "Host Player")
+        self.register(player, "bet-player", "Fast Player")
+        self.register(first_bidder, "bet-one", "Bidder One")
+        self.register(second_bidder, "bet-two", "Bidder Two")
+        self.register(losing_bidder, "bet-three", "Bidder Three")
+
+        created = host.post("/lobbies", json={
+            "name": "Betting room",
+            "lobby_limit": 5,
+            "player_limit": 2,
+            "bidder_limit": 3,
+        })
+        code = created.get_json()["code"]
+        player_join = player.post(f"/lobbies/{code}/join", json={}).get_json()
+        player_id = next(row["user_id"] for row in player_join["players"] if row["name"] == "Fast Player")
+        first_join = first_bidder.post(f"/lobbies/{code}/join", json={}).get_json()
+        first_id = next(row["user_id"] for row in first_join["bidders"] if row["name"] == "Bidder One")
+        second_join = second_bidder.post(f"/lobbies/{code}/join", json={}).get_json()
+        second_id = next(row["user_id"] for row in second_join["bidders"] if row["name"] == "Bidder Two")
+        losing_join = losing_bidder.post(f"/lobbies/{code}/join", json={}).get_json()
+        losing_id = next(row["user_id"] for row in losing_join["bidders"] if row["name"] == "Bidder Three")
+
+        started = host.post(f"/lobbies/{code}/start").get_json()
+        self.assertEqual(started["phase"], "instructions")
+        self.assertEqual(started["seconds_remaining"], 20)
+        self.assertTrue(all(row["balance"] == 1000 for row in started["betting"]["bidders"]))
+        self.assertEqual(first_bidder.post(f"/lobbies/{code}/game/bets", json={
+            "player_user_id": player_id,
+            "amount": "100.00",
+        }).status_code, 409)
+
+        with app.app_context():
+            control = GameControl.query.one()
+            control.round_started_at = utc_now()
+            db.session.commit()
+
+        betting = host.get(f"/lobbies/{code}/game").get_json()
+        self.assertEqual(betting["phase"], "betting")
+
+        self.assertEqual(first_bidder.post(f"/lobbies/{code}/game/bets", json={
+            "player_user_id": player_id,
+            "amount": "100.00",
+        }).status_code, 201)
+        self.assertEqual(second_bidder.post(f"/lobbies/{code}/game/bets", json={
+            "player_user_id": player_id,
+            "amount": "200.00",
+        }).status_code, 201)
+        self.assertEqual(losing_bidder.post(f"/lobbies/{code}/game/bets", json={
+            "player_user_id": created.get_json()["host_user_id"],
+            "amount": "1000.00",
+        }).status_code, 201)
+
+        with app.app_context():
+            control = GameControl.query.one()
+            control.phase = "running"
+            control.round_started_at = utc_now() - timedelta(seconds=31)
+            db.session.commit()
+
+        finalizing = host.get(f"/lobbies/{code}/game").get_json()
+        self.assertEqual(finalizing["phase"], "settling")
+        self.assertFalse(finalizing["betting"]["settled"])
+
+        self.assertEqual(host.post(f"/lobbies/{code}/game/submit", json={
+            "round_index": 0,
+            "typed": "",
+        }).status_code, 201)
+        completed = player.post(f"/lobbies/{code}/game/submit", json={
+            "round_index": 0,
+            "typed": started["prompt"],
+        })
+        self.assertEqual(completed.status_code, 201)
+
+        game = host.get(f"/lobbies/{code}/game").get_json()
+        self.assertEqual(game["phase"], "leaderboard")
+        self.assertEqual(game["betting"]["pot"], 1300)
+        self.assertEqual({winner["user_id"] for winner in game["betting"]["winners"]}, {first_id, second_id})
+        self.assertTrue(all(winner["payout"] == 650 for winner in game["betting"]["winners"]))
+        balances = {row["user_id"]: row["balance"] for row in game["betting"]["bidders"]}
+        self.assertEqual(balances[first_id], 1550)
+        self.assertEqual(balances[second_id], 1450)
+        self.assertEqual(balances[losing_id], 0)
+        self.assertEqual(
+            [row["user_id"] for row in game["bidder_standings"]],
+            [first_id, second_id, losing_id],
+        )
+
+        next_round = host.post(f"/lobbies/{code}/next").get_json()
+        self.assertEqual(next_round["phase"], "betting")
+        next_balances = {
+            row["user_id"]: row["balance"] for row in next_round["betting"]["bidders"]
+        }
+        self.assertEqual(next_balances[losing_id], 50)
+
+        with app.app_context():
+            control = GameControl.query.one()
+            control.round_index = 2
+            control.phase = "leaderboard"
+            control.betting_settled = True
+            db.session.commit()
+
+        finished = host.post(f"/lobbies/{code}/next").get_json()
+        self.assertEqual(finished["phase"], "finished")
+        self.assertEqual(
+            [row["user_id"] for row in finished["bidder_standings"]],
+            [first_id, second_id, losing_id],
+        )
+
+        self.assertEqual(host.delete(f"/lobbies/{code}/leave").status_code, 200)
+        self.assertEqual(player.delete(f"/lobbies/{code}/leave").status_code, 200)
+        bidder_host_lobby = first_bidder.get(f"/lobbies/{code}").get_json()
+        self.assertEqual(bidder_host_lobby["players"], [])
+        self.assertEqual(
+            {row["user_id"] for row in bidder_host_lobby["bidders"]},
+            {first_id, second_id, losing_id},
+        )
+        self.assertIn(bidder_host_lobby["host_user_id"], {first_id, second_id, losing_id})
+
     def test_admin_manages_users_and_lobbies_without_player_access(self):
         admin = app.test_client()
         host = app.test_client()
@@ -196,8 +384,9 @@ class LobbyFlowTest(unittest.TestCase):
 
         created = host.post("/lobbies", json={
             "name": "Admin test room",
+            "lobby_limit": 8,
             "player_limit": 4,
-            "viewer_limit": 4,
+            "bidder_limit": 4,
         })
         self.assertEqual(created.status_code, 201)
         code = created.get_json()["code"]
@@ -230,8 +419,9 @@ class LobbyFlowTest(unittest.TestCase):
         self.assertEqual(admin.post(f"/lobbies/{code}/join", json={}).status_code, 403)
         self.assertEqual(admin.post("/lobbies", json={
             "name": "Forbidden room",
+            "lobby_limit": 8,
             "player_limit": 4,
-            "viewer_limit": 4,
+            "bidder_limit": 4,
         }).status_code, 403)
 
         closed = admin.delete(f"/admin/lobbies/{code}")

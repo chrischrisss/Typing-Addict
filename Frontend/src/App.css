@@ -97,6 +97,41 @@ button {
   box-shadow: 10px 10px 0 #d8ff3e;
 }
 
+.final-scoreboards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 28px;
+  width: min(1180px, 100%);
+  margin: 38px 0 28px;
+  text-align: left;
+}
+
+.final-scoreboard {
+  min-width: 0;
+  padding: 24px;
+  background: #202421;
+  border: 1px solid #353936;
+  border-radius: 10px;
+}
+
+.final-scoreboard h2 {
+  margin: 6px 0 0;
+  font-size: clamp(1.5rem, 3vw, 2.4rem);
+  text-transform: uppercase;
+}
+
+.final-scoreboard .results-list {
+  width: 100%;
+  margin: 20px 0 0;
+  padding: 0;
+}
+
+@media (max-width: 800px) {
+  .final-scoreboards {
+    grid-template-columns: 1fr;
+  }
+}
+
 .roster-panel,
 .round-order-panel {
   padding: 30px;
@@ -120,7 +155,7 @@ button {
   font-weight: 900;
 }
 
-.viewer-heading {
+.bidder-heading {
   margin-top: 30px;
 }
 
@@ -536,6 +571,156 @@ button {
   font-size: 1.4rem;
   font-weight: 900;
   text-transform: uppercase;
+}
+
+.betting-stage {
+  display: grid;
+  align-content: start;
+  gap: 56px;
+}
+
+.instruction-stage {
+  display: grid;
+  align-content: start;
+  gap: 48px;
+}
+
+.instruction-panel {
+  width: min(820px, 100%);
+  margin: 0 auto;
+  padding: 30px;
+  color: #161816;
+  background: #f4f1e8;
+  border: 3px solid #d8ff3e;
+  border-radius: 10px;
+}
+
+.instruction-intro {
+  margin: 0 0 20px;
+  font-size: 1.15rem;
+  font-weight: 900;
+}
+
+.instruction-panel ol {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding-left: 24px;
+  line-height: 1.45;
+}
+
+.instruction-panel li::marker {
+  color: #568000;
+  font-weight: 900;
+}
+
+.instruction-footer {
+  margin: -24px auto 0;
+  color: #a5aaa7;
+  text-align: center;
+}
+
+.betting-panel,
+.betting-results {
+  width: min(620px, 100%);
+  margin: 0 auto;
+  padding: 28px;
+  color: #161816;
+  background: #f4f1e8;
+  border: 3px solid #d8ff3e;
+  border-radius: 10px;
+}
+
+.betting-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.betting-panel label,
+.betting-balance span {
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.betting-panel input[type="number"],
+.betting-panel select {
+  width: 100%;
+  padding: 13px;
+  background: #fff;
+  border: 2px solid #161816;
+  border-radius: 5px;
+}
+
+.betting-field-label {
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.bet-player-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.bet-player-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 58px;
+  padding: 12px;
+  background: #fff;
+  border: 2px solid #161816;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.bet-player-card.selected {
+  background: #d8ff3e;
+  box-shadow: 0 0 0 3px rgba(86, 128, 0, 0.28);
+}
+
+.bet-player-card input {
+  width: 18px;
+  height: 18px;
+  accent-color: #568000;
+}
+
+.betting-balance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.betting-balance strong {
+  color: #568000;
+  font-size: 2rem;
+}
+
+.bet-locked {
+  padding: 18px;
+  background: #d8ff3e;
+  border-radius: 5px;
+  font-weight: 900;
+}
+
+.betting-wait {
+  text-align: center;
+}
+
+.betting-results {
+  margin-bottom: 24px;
+}
+
+.betting-results h2,
+.betting-results p {
+  margin: 8px 0;
+}
+
+.betting-winner-list {
+  margin-top: 16px;
+  padding-top: 8px;
+  border-top: 1px solid #aaa89f;
 }
 
 .transition-screen {

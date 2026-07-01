@@ -11,7 +11,7 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
 
   useEffect(() => {
     const phase = lobby.game?.phase;
-    if (!lobby.code || !phase || !["countdown", "running"].includes(phase)) {
+    if (!lobby.code || !phase || !["instructions", "betting", "countdown", "running", "settling"].includes(phase)) {
       return undefined;
     }
 
@@ -46,16 +46,16 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   useLobbySocket(lobby.code, {
     onLobbyUpdated: (data) => {
       const isPlayer = data.players?.some((player) => player.user_id === user.user_id);
-      const isViewer = data.viewers?.some((viewer) => viewer.user_id === user.user_id);
+      const isBidder = data.bidders?.some((bidder) => bidder.user_id === user.user_id);
 
-      if (!isPlayer && !isViewer) {
+      if (!isPlayer && !isBidder) {
         setExiting(true);
         onExit("You are no longer in this lobby.");
         return;
       }
 
-      const role = isViewer
-        ? "viewer"
+      const role = isBidder
+        ? "bidder"
         : data.host_user_id === user.user_id
           ? "host"
           : "player";
@@ -147,7 +147,10 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
       <GameSequence
         code={lobby.code}
         game={lobby.game}
-        isViewer={lobby.role === "viewer"}
+        isBidder={
+          lobby.role === "bidder"
+          || lobby.bidders?.some((bidder) => bidder.user_id === user.user_id)
+        }
         liveProgress={liveProgress}
         onLeave={leaveLobby}
         onProgress={sendGameProgress}
@@ -174,6 +177,10 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
       <section className="waiting-content">
         <div className="roster-panel">
           <div className="roster-heading">
+            <h2>Lobby</h2>
+            <span>{(lobby.players?.length || 0) + (lobby.bidders?.length || 0)} / {lobby.lobby_limit}</span>
+          </div>
+          <div className="roster-heading">
             <h2>Players</h2>
             <span>{lobby.players?.length || 0} / {lobby.player_limit}</span>
           </div>
@@ -190,18 +197,18 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
             ))}
           </div>
 
-          {(lobby.viewers?.length || 0) > 0 && (
+          {(lobby.bidders?.length || 0) > 0 && (
             <>
-              <div className="roster-heading viewer-heading">
-                <h2>Viewers</h2>
-                <span>{lobby.viewers.length} / {lobby.viewer_limit}</span>
+              <div className="roster-heading bidder-heading">
+                <h2>Bidders</h2>
+                <span>{lobby.bidders.length} / {lobby.bidder_limit}</span>
               </div>
               <div className="player-list">
-                {lobby.viewers.map((viewer) => (
-                  <div className="player-row muted" key={viewer.user_id}>
+                {lobby.bidders.map((bidder) => (
+                  <div className="player-row muted" key={bidder.user_id}>
                     <span className="player-dot" />
-                    <strong>{viewer.name}</strong>
-                    <span className="player-role">viewer</span>
+                    <strong>{bidder.name}</strong>
+                    <span className="player-role">bidder</span>
                   </div>
                 ))}
               </div>

@@ -77,8 +77,9 @@ function Lobby({ handleLogout, user }) {
   const [joinMessage, setJoinMessage] = useState("");
   const [inviteNotice, setInviteNotice] = useState("");
   const [lobbyName, setLobbyName] = useState("");
+  const [lobbyLimit, setLobbyLimit] = useState(16);
   const [playerLimit, setPlayerLimit] = useState(4);
-  const [viewerLimit, setViewerLimit] = useState(12);
+  const [bidderLimit, setBidderLimit] = useState(12);
   const [typingRounds, setTypingRounds] = useState(1);
   const [clickingRounds, setClickingRounds] = useState(1);
   const [spacebarRounds, setSpacebarRounds] = useState(1);
@@ -138,7 +139,7 @@ function Lobby({ handleLogout, user }) {
         setJoinLobbyInfo(data);
         setJoinCode(inviteCode);
         setLobbyMode("join");
-        setJoinMessage(`${data.name} is open. Your role will be assigned randomly.`);
+        setJoinMessage(`${data.name} is open. Player spots are filled first.`);
       } catch {
         if (active) {
           setInviteNotice("Could not connect to the server.");
@@ -209,7 +210,7 @@ function Lobby({ handleLogout, user }) {
         return {
           ...current,
           playerCount: data.player_count,
-          viewerCount: data.viewer_count,
+          bidderCount: data.bidder_count,
         };
       });
     },
@@ -298,8 +299,9 @@ function Lobby({ handleLogout, user }) {
   async function submitCreateLobby(event) {
     event.preventDefault();
     const cleanLobbyName = lobbyName.trim().replace(/\s+/g, " ");
+    const lobbySize = Number(lobbyLimit);
     const players = Number(playerLimit);
-    const viewers = Number(viewerLimit);
+    const bidders = Number(bidderLimit);
     const modeRounds = [typingRounds, clickingRounds, spacebarRounds].map(Number);
     const seconds = Number(roundDuration);
 
@@ -308,13 +310,18 @@ function Lobby({ handleLogout, user }) {
       return;
     }
 
-    if (!Number.isInteger(players) || players < 2 || players > 12) {
-      setCreateMessage("Player size must be between 2 and 12.");
+    if (!Number.isInteger(lobbySize) || lobbySize < 1 || lobbySize > 100) {
+      setCreateMessage("Lobby size must be between 1 and 100.");
       return;
     }
 
-    if (!Number.isInteger(viewers) || viewers < 0 || viewers > 100) {
-      setCreateMessage("Viewer size must be between 0 and 100.");
+    if (!Number.isInteger(players) || players < 1 || players > 100) {
+      setCreateMessage("Player size must be between 1 and 100.");
+      return;
+    }
+
+    if (!Number.isInteger(bidders) || bidders < 0 || bidders > 50) {
+      setCreateMessage("Bidder size must be between 0 and 50.");
       return;
     }
 
@@ -337,8 +344,9 @@ function Lobby({ handleLogout, user }) {
         credentials: "include",
         body: JSON.stringify({
           name: cleanLobbyName,
+          lobby_limit: lobbySize,
           player_limit: players,
-          viewer_limit: viewers,
+          bidder_limit: bidders,
           typing_rounds: modeRounds[0],
           clicking_rounds: modeRounds[1],
           spacebar_rounds: modeRounds[2],
@@ -356,10 +364,11 @@ function Lobby({ handleLogout, user }) {
         code: data.code,
         link: `${window.location.origin}/?lobby=${data.code}`,
         name: data.name,
+        lobbySize: data.lobby_limit,
         players: data.player_limit,
-        viewers: data.viewer_limit,
+        bidders: data.bidder_limit,
         playerCount: data.player_count,
-        viewerCount: data.viewer_count,
+        bidderCount: data.bidder_count,
         typingRounds: data.typing_rounds,
         clickingRounds: data.clicking_rounds,
         spacebarRounds: data.spacebar_rounds,
@@ -375,6 +384,11 @@ function Lobby({ handleLogout, user }) {
       code: createdInvite.code,
       name: createdInvite.name,
       role: "host",
+      lobby_limit: createdInvite.lobbySize,
+      player_limit: createdInvite.players,
+      bidder_limit: createdInvite.bidders,
+      players: [],
+      bidders: [],
       typing_rounds: createdInvite.typingRounds,
       clicking_rounds: createdInvite.clickingRounds,
       spacebar_rounds: createdInvite.spacebarRounds,
@@ -480,12 +494,13 @@ function Lobby({ handleLogout, user }) {
               placeholder="A1B2C3"
             />
             <p className="random-role-note">
-              You will be randomly assigned as a player or viewer based on available spots.
+              Player spots are filled first. Once full, new arrivals join as bidders.
             </p>
             {joinLobbyInfo && (
               <p className="invite-meta">
+                {joinLobbyInfo.player_count + joinLobbyInfo.bidder_count} / {joinLobbyInfo.lobby_limit} total ·{" "}
                 {joinLobbyInfo.player_count} / {joinLobbyInfo.player_limit} players ·{" "}
-                {joinLobbyInfo.viewer_count} / {joinLobbyInfo.viewer_limit} viewers
+                {joinLobbyInfo.bidder_count} / {joinLobbyInfo.bidder_limit} bidders
               </p>
             )}
             <div className="profile-actions">
@@ -521,25 +536,36 @@ function Lobby({ handleLogout, user }) {
 
             <div className="setup-grid">
               <div>
-                <label htmlFor="player-limit">Lobby size</label>
+                <label htmlFor="lobby-limit">Lobby size</label>
+                <input
+                  id="lobby-limit"
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={lobbyLimit}
+                  onChange={(event) => setLobbyLimit(event.target.value)}
+                />
+              </div>
+              <div>
+                <label htmlFor="player-limit">Player size</label>
                 <input
                   id="player-limit"
                   type="number"
-                  min="2"
-                  max="12"
+                  min="1"
+                  max="100"
                   value={playerLimit}
                   onChange={(event) => setPlayerLimit(event.target.value)}
                 />
               </div>
               <div>
-                <label htmlFor="viewer-limit">Viewer size</label>
+                <label htmlFor="bidder-limit">Bidder size</label>
                 <input
-                  id="viewer-limit"
+                  id="bidder-limit"
                   type="number"
                   min="0"
-                  max="100"
-                  value={viewerLimit}
-                  onChange={(event) => setViewerLimit(event.target.value)}
+                  max="50"
+                  value={bidderLimit}
+                  onChange={(event) => setBidderLimit(event.target.value)}
                 />
               </div>
             </div>
@@ -616,8 +642,9 @@ function Lobby({ handleLogout, user }) {
             <label htmlFor="invite-link">Invite link</label>
             <input id="invite-link" type="text" readOnly value={createdInvite.link} />
             <p className="invite-meta">
+              {createdInvite.playerCount + createdInvite.bidderCount} / {createdInvite.lobbySize} total ·{" "}
               {createdInvite.playerCount} / {createdInvite.players} players ·{" "}
-              {createdInvite.viewerCount} / {createdInvite.viewers} viewers
+              {createdInvite.bidderCount} / {createdInvite.bidders} bidders
             </p>
             <p className="invite-settings">
               {createdInvite.typingRounds} typing · {createdInvite.clickingRounds} clicking ·{" "}

@@ -21,8 +21,9 @@ class Lobby(db.Model):
     code = db.Column(db.String(6), unique=True, nullable=False, index=True)
     name = db.Column(db.String(32), nullable=False)
     host_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    lobby_limit = db.Column(db.Integer, nullable=False)
     player_limit = db.Column(db.Integer, nullable=False)
-    viewer_limit = db.Column(db.Integer, nullable=False)
+    bidder_limit = db.Column(db.Integer, nullable=False)
     typing_rounds = db.Column(db.Integer, nullable=False, default=1)
     clicking_rounds = db.Column(db.Integer, nullable=False, default=1)
     spacebar_rounds = db.Column(db.Integer, nullable=False, default=1)
@@ -31,7 +32,7 @@ class Lobby(db.Model):
     updated_at = db.Column(db.DateTime, server_default=db.func.now(), onupdate=db.func.now())
     host = db.relationship("User", backref="hosted_lobbies")
     players = db.relationship("Player", backref="lobby", lazy=True)
-    viewers = db.relationship("Viewer", backref="lobby", lazy=True)
+    bidders = db.relationship("Bidder", backref="lobby", lazy=True)
 
 class Player(db.Model):
     __table_args__ = (db.UniqueConstraint("user_id", "lobby_id", name="uq_player_lobby_user"),)
@@ -44,13 +45,14 @@ class Player(db.Model):
     created_at = db.Column(db.DateTime, server_default=db.func.now())
     updated_at = db.Column(db.DateTime, server_default=db.func.now(), onupdate=db.func.now())
 
-class Viewer(db.Model):
-    __table_args__ = (db.UniqueConstraint("user_id", "lobby_id", name="uq_viewer_lobby_user"),)
+class Bidder(db.Model):
+    __table_args__ = (db.UniqueConstraint("user_id", "lobby_id", name="uq_bidder_lobby_user"),)
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    user = db.relationship('User', backref='viewers')
+    user = db.relationship('User', backref='bidders')
     lobby_id = db.Column(db.Integer, db.ForeignKey('lobby.id'), nullable=False)
+    balance_cents = db.Column(db.Integer, nullable=False, default=100000)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
 
 
@@ -68,6 +70,7 @@ class GameControl(db.Model):
     round_index = db.Column(db.Integer, nullable=False, default=0)
     phase = db.Column(db.String(20), nullable=False, default="countdown")
     round_started_at = db.Column(db.DateTime, nullable=False)
+    betting_settled = db.Column(db.Boolean, nullable=False, default=False)
     updated_at = db.Column(db.DateTime, server_default=db.func.now(), onupdate=db.func.now())
 
 
@@ -83,4 +86,20 @@ class GameResult(db.Model):
     score = db.Column(db.Integer, nullable=False, default=0)
     metric = db.Column(db.Integer, nullable=False, default=0)
     accuracy = db.Column(db.Integer)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+
+
+class Bet(db.Model):
+    __table_args__ = (
+        db.UniqueConstraint("game_session_id", "bidder_user_id", "round_index", name="uq_round_bet"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    game_session_id = db.Column(db.Integer, db.ForeignKey("game_session.id"), nullable=False)
+    bidder_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    player_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    round_index = db.Column(db.Integer, nullable=False)
+    amount_cents = db.Column(db.Integer, nullable=False)
+    payout_cents = db.Column(db.Integer)
+    won = db.Column(db.Boolean)
     created_at = db.Column(db.DateTime, server_default=db.func.now())

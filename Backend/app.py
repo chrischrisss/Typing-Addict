@@ -2,6 +2,7 @@ import os
 import random
 import warnings
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
@@ -19,17 +20,22 @@ from sqlalchemy import inspect, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from games import calc_score, calc_wpm, check_progress, pick_prompt, score_clicking, score_spacebar
-from models import GameControl, GameResult, GameSession, Lobby, Player, User, UserProfile, Viewer, db
+from models import Bet, Bidder, GameControl, GameResult, GameSession, Lobby, Player, User, UserProfile, db
 
 
 CODE_CHARACTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 GAME_TYPES = ("typing", "clicking", "spacebar")
 DEFAULT_ROUND_DURATION = 30
 START_COUNTDOWN_DURATION = 3
+INSTRUCTION_DURATION = 30
+BETTING_DURATION = 20
+RESULT_GRACE_DURATION = 2
+STARTING_BALANCE_CENTS = 100000
+REBUY_CENTS = 5000
 LIVE_PROGRESS = {}
 ACTION_PROGRESS_TARGETS = {
-    "clicking": 150,
-    "spacebar": 200,
+    "clicking": 100,
+    "spacebar": 100,
 }
 
 
@@ -125,9 +131,42 @@ socketio = SocketIO(
 )
 
 
+def migrate_legacy_role_schema():
+    inspector = inspect(db.engine)
+    tables = set(inspector.get_table_names())
+
+    if "lobby" in tables:
+        columns = {column["name"] for column in inspector.get_columns("lobby")}
+        if "bidder_limit" not in columns and "gambler_limit" in columns:
+            db.session.execute(text(
+                "ALTER TABLE lobby RENAME COLUMN gambler_limit TO bidder_limit"
+            ))
+        elif "bidder_limit" not in columns and "viewer_limit" in columns:
+            db.session.execute(text(
+                "ALTER TABLE lobby RENAME COLUMN viewer_limit TO bidder_limit"
+            ))
+
+    if "bidder" not in tables and "gambler" in tables:
+        db.session.execute(text("ALTER TABLE gambler RENAME TO bidder"))
+    elif "bidder" not in tables and "viewer" in tables:
+        db.session.execute(text("ALTER TABLE viewer RENAME TO bidder"))
+
+    if "bet" in tables:
+        columns = {column["name"] for column in inspector.get_columns("bet")}
+        if "bidder_user_id" not in columns and "gambler_user_id" in columns:
+            db.session.execute(text(
+                "ALTER TABLE bet RENAME COLUMN gambler_user_id TO bidder_user_id"
+            ))
+
+    db.session.commit()
+
+
 def ensure_lobby_settings_columns():
     existing = {column["name"] for column in inspect(db.engine).get_columns("lobby")}
+    added_lobby_limit = "lobby_limit" not in existing
     settings = {
+        "lobby_limit": 100,
+        "bidder_limit": 0,
         "typing_rounds": 1,
         "clicking_rounds": 1,
         "spacebar_rounds": 1,
@@ -138,12 +177,41 @@ def ensure_lobby_settings_columns():
             db.session.execute(text(
                 f"ALTER TABLE lobby ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default}"
             ))
+    if added_lobby_limit:
+        db.session.execute(text(
+            "UPDATE lobby SET lobby_limit = CASE "
+            "WHEN player_limit + bidder_limit > 100 THEN 100 "
+            "ELSE player_limit + bidder_limit END"
+        ))
+    db.session.execute(text(
+        "UPDATE lobby SET bidder_limit = 50 WHERE bidder_limit > 50"
+    ))
+    db.session.commit()
+
+
+def ensure_betting_columns():
+    bidder_columns = {column["name"] for column in inspect(db.engine).get_columns("bidder")}
+    if "balance_cents" not in bidder_columns:
+        db.session.execute(text(
+            f"ALTER TABLE bidder ADD COLUMN balance_cents INTEGER NOT NULL "
+            f"DEFAULT {STARTING_BALANCE_CENTS}"
+        ))
+
+    control_columns = {
+        column["name"] for column in inspect(db.engine).get_columns("game_control")
+    }
+    if "betting_settled" not in control_columns:
+        db.session.execute(text(
+            "ALTER TABLE game_control ADD COLUMN betting_settled BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
     db.session.commit()
 
 
 with app.app_context():
+    migrate_legacy_role_schema()
     db.create_all()
     ensure_lobby_settings_columns()
+    ensure_betting_columns()
 
     if not User.query.first():
         user = User(
@@ -277,8 +345,8 @@ def lobby_membership(lobby_id, user_id):
     if Player.query.filter_by(lobby_id=lobby_id, user_id=user_id).first():
         return "player"
 
-    if Viewer.query.filter_by(lobby_id=lobby_id, user_id=user_id).first():
-        return "viewer"
+    if Bidder.query.filter_by(lobby_id=lobby_id, user_id=user_id).first():
+        return "bidder"
 
     return None
 
@@ -294,7 +362,7 @@ def is_admin_user(user_id):
 
 def lobby_members(lobby):
     players = Player.query.filter_by(lobby_id=lobby.id).all()
-    viewers = Viewer.query.filter_by(lobby_id=lobby.id).all()
+    bidders = Bidder.query.filter_by(lobby_id=lobby.id).all()
 
     return {
         "players": [
@@ -306,13 +374,14 @@ def lobby_members(lobby):
             }
             for player in players
         ],
-        "viewers": [
+        "bidders": [
             {
-                "user_id": viewer.user_id,
-                "name": display_name_for(viewer.user),
-                "role": "viewer",
+                "user_id": bidder.user_id,
+                "name": display_name_for(bidder.user),
+                "role": "bidder",
+                "balance": bidder.balance_cents / 100,
             }
-            for viewer in viewers
+            for bidder in bidders
         ],
     }
 
@@ -325,6 +394,106 @@ def game_order_for(lobby):
     )
 
 
+def start_betting_phase(lobby, control, round_index):
+    if round_index > 0:
+        for bidder in Bidder.query.filter_by(lobby_id=lobby.id).all():
+            if bidder.balance_cents <= 0:
+                bidder.balance_cents = REBUY_CENTS
+
+    control.round_index = round_index
+    control.phase = "betting"
+    control.round_started_at = utc_now() + timedelta(seconds=BETTING_DURATION)
+    control.betting_settled = False
+
+
+def round_winning_player_ids(lobby, session, round_index):
+    player_ids = {
+        player.user_id for player in Player.query.filter_by(lobby_id=lobby.id).all()
+    }
+    results = GameResult.query.filter_by(
+        game_session_id=session.id,
+        round_index=round_index,
+    ).all()
+    scores = {user_id: 0 for user_id in player_ids}
+    for result in results:
+        scores[result.user_id] = result.score
+    if not scores:
+        return set()
+    top_score = max(scores.values())
+    return {user_id for user_id, score in scores.items() if score == top_score}
+
+
+def settle_round_bets(lobby, session, control):
+    if control.betting_settled:
+        return
+
+    bets = Bet.query.filter_by(
+        game_session_id=session.id,
+        round_index=control.round_index,
+    ).all()
+    winning_player_ids = round_winning_player_ids(lobby, session, control.round_index)
+    winning_bets = [bet for bet in bets if bet.player_user_id in winning_player_ids]
+    payout_cents = sum(bet.amount_cents for bet in bets) // len(winning_bets) if winning_bets else 0
+
+    for bet in bets:
+        bet.won = bet in winning_bets
+        bet.payout_cents = payout_cents if bet.won else 0
+        if bet.won:
+            bidder = Bidder.query.filter_by(
+                lobby_id=lobby.id,
+                user_id=bet.bidder_user_id,
+            ).first()
+            if bidder:
+                bidder.balance_cents += payout_cents
+
+    control.betting_settled = True
+
+
+def betting_payload(lobby, session, control):
+    bets = Bet.query.filter_by(
+        game_session_id=session.id,
+        round_index=control.round_index,
+    ).all()
+    members = lobby_members(lobby)
+    player_names = {player["user_id"]: player["name"] for player in members["players"]}
+    bidder_names = {bidder["user_id"]: bidder["name"] for bidder in members["bidders"]}
+    winning_player_ids = (
+        round_winning_player_ids(lobby, session, control.round_index)
+        if control.betting_settled
+        else set()
+    )
+
+    return {
+        "duration": BETTING_DURATION,
+        "pot": sum(bet.amount_cents for bet in bets) / 100,
+        "bettor_ids": [bet.bidder_user_id for bet in bets],
+        "bidders": members["bidders"],
+        "winning_players": [
+            {
+                "user_id": user_id,
+                "name": player_names.get(user_id, "Former player (left)"),
+            }
+            for user_id in winning_player_ids
+        ],
+        "winners": [
+            {
+                "user_id": bet.bidder_user_id,
+                "name": bidder_names.get(
+                    bet.bidder_user_id,
+                    display_name_for(db.session.get(User, bet.bidder_user_id)),
+                ),
+                "player_user_id": bet.player_user_id,
+                "player_name": player_names.get(bet.player_user_id, "Former player (left)"),
+                "wager": bet.amount_cents / 100,
+                "payout": (bet.payout_cents or 0) / 100,
+            }
+            for bet in bets
+            if bet.won
+        ],
+        "settled": control.betting_settled,
+    }
+
+
 def game_control(session):
     control = GameControl.query.filter_by(game_session_id=session.id).first()
     if control:
@@ -333,8 +502,9 @@ def game_control(session):
     control = GameControl(
         game_session_id=session.id,
         round_index=0,
-        phase="countdown",
-        round_started_at=utc_now() + timedelta(seconds=START_COUNTDOWN_DURATION),
+        phase="instructions",
+        round_started_at=utc_now() + timedelta(seconds=INSTRUCTION_DURATION),
+        betting_settled=False,
     )
     db.session.add(control)
     db.session.commit()
@@ -344,6 +514,16 @@ def game_control(session):
 def sync_game_control(lobby, session, control):
     now = utc_now()
     changed = False
+
+    if control.phase == "instructions" and now >= control.round_started_at:
+        control.phase = "betting"
+        control.round_started_at += timedelta(seconds=BETTING_DURATION)
+        changed = True
+
+    if control.phase == "betting" and now >= control.round_started_at:
+        control.phase = "countdown"
+        control.round_started_at += timedelta(seconds=START_COUNTDOWN_DURATION)
+        changed = True
 
     if control.phase == "countdown" and now >= control.round_started_at:
         control.phase = "running"
@@ -357,8 +537,18 @@ def sync_game_control(lobby, session, control):
             round_index=control.round_index,
         ).count()
         if elapsed >= lobby.round_duration or (player_count > 0 and result_count >= player_count):
-            control.phase = "leaderboard"
+            if player_count > 0 and result_count >= player_count:
+                control.phase = "leaderboard"
+                settle_round_bets(lobby, session, control)
+            else:
+                control.phase = "settling"
+                control.round_started_at = now + timedelta(seconds=RESULT_GRACE_DURATION)
             changed = True
+
+    if control.phase == "settling" and now >= control.round_started_at:
+        control.phase = "leaderboard"
+        settle_round_bets(lobby, session, control)
+        changed = True
 
     if changed:
         db.session.commit()
@@ -370,7 +560,7 @@ def round_state(lobby, session, control):
     game_type = game_order[control.round_index]
     elapsed = max(0, (utc_now() - control.round_started_at).total_seconds())
 
-    if control.phase == "countdown":
+    if control.phase in ("instructions", "betting", "countdown"):
         seconds = max(1, round((control.round_started_at - utc_now()).total_seconds()))
     elif control.phase == "running":
         seconds = max(0, round(lobby.round_duration - elapsed))
@@ -387,7 +577,11 @@ def round_state(lobby, session, control):
             else None
         ),
         "seconds_remaining": seconds,
-        "elapsed_seconds": min(lobby.round_duration, max(0.01, elapsed)),
+        "elapsed_seconds": (
+            lobby.round_duration
+            if control.phase in ("settling", "leaderboard", "finished")
+            else min(lobby.round_duration, max(0.01, elapsed))
+        ),
     }
 
 
@@ -400,6 +594,15 @@ def game_payload(lobby, session=None):
     state = round_state(lobby, session, control)
     results = GameResult.query.filter_by(game_session_id=session.id).all()
     names = {member["user_id"]: member["name"] for member in lobby_members(lobby)["players"]}
+    result_user_ids = {result.user_id for result in results}
+    departed_names = {
+        user.id: f"{display_name_for(user)} (left)"
+        for user in User.query.filter(User.id.in_(result_user_ids - names.keys())).all()
+    }
+
+    def leaderboard_name(user_id):
+        return names.get(user_id) or departed_names.get(user_id, "Former player (left)")
+
     totals = {user_id: 0 for user_id in names}
     previous_totals = {user_id: 0 for user_id in names}
     round_scores = {user_id: 0 for user_id in names}
@@ -416,18 +619,46 @@ def game_payload(lobby, session=None):
         for user_id, _ in sorted(previous_totals.items(), key=lambda item: item[1], reverse=True)
     ]
     sorted_totals = sorted(totals.items(), key=lambda item: item[1], reverse=True)
+    current_bidders = lobby_members(lobby)["bidders"]
+    bidder_standing_rows = {
+        bidder["user_id"]: {
+            "user_id": bidder["user_id"],
+            "name": bidder["name"],
+            "balance": bidder["balance"],
+        }
+        for bidder in current_bidders
+    }
+    session_bets = Bet.query.filter_by(game_session_id=session.id).all()
+    historical_bidder_ids = {bet.bidder_user_id for bet in session_bets}
+    for bidder_user_id in historical_bidder_ids - bidder_standing_rows.keys():
+        user = db.session.get(User, bidder_user_id)
+        user_bets = [bet for bet in session_bets if bet.bidder_user_id == bidder_user_id]
+        balance_cents = STARTING_BALANCE_CENTS + sum(
+            (bet.payout_cents or 0) - bet.amount_cents for bet in user_bets
+        )
+        bidder_standing_rows[bidder_user_id] = {
+            "user_id": bidder_user_id,
+            "name": f"{display_name_for(user)} (left)" if user else "Former bidder (left)",
+            "balance": max(0, balance_cents) / 100,
+        }
+    bidder_standings = sorted(
+        bidder_standing_rows.values(),
+        key=lambda bidder: (-bidder["balance"], bidder["name"].lower()),
+    )
 
     state.update({
         "session_id": session.id,
         "game_order": game_order_for(lobby),
         "round_duration": lobby.round_duration,
         "host_user_id": lobby.host_user_id,
+        "players": lobby_members(lobby)["players"],
+        "betting": betting_payload(lobby, session, control),
         "prompt": session.typing_prompt if state["game_type"] == "typing" else None,
         "live_progress": live_progress_payload(lobby, session, control),
         "results": [
             {
                 "user_id": result.user_id,
-                "name": names.get(result.user_id, "Former player"),
+                "name": leaderboard_name(result.user_id),
                 "round_index": result.round_index,
                 "score": result.score,
                 "metric": result.metric,
@@ -438,12 +669,20 @@ def game_payload(lobby, session=None):
         "standings": [
             {
                 "user_id": user_id,
-                "name": names.get(user_id, "Former player"),
+                "name": leaderboard_name(user_id),
                 "score": score,
                 "round_score": round_scores.get(user_id, 0),
                 "previous_rank": previous_order.index(user_id) if user_id in previous_order else None,
             }
             for user_id, score in sorted_totals
+        ],
+        "bidder_standings": [
+            {
+                "user_id": bidder["user_id"],
+                "name": bidder["name"],
+                "balance": bidder["balance"],
+            }
+            for bidder in bidder_standings
         ],
     })
     return state
@@ -451,20 +690,21 @@ def game_payload(lobby, session=None):
 
 def lobby_payload(lobby, role=None, include_members=False):
     player_count = Player.query.filter_by(lobby_id=lobby.id).count()
-    viewer_count = Viewer.query.filter_by(lobby_id=lobby.id).count()
+    bidder_count = Bidder.query.filter_by(lobby_id=lobby.id).count()
 
     payload = {
         "code": lobby.code,
         "name": lobby.name,
         "host_user_id": lobby.host_user_id,
+        "lobby_limit": lobby.lobby_limit,
         "player_limit": lobby.player_limit,
-        "viewer_limit": lobby.viewer_limit,
+        "bidder_limit": lobby.bidder_limit,
         "typing_rounds": lobby.typing_rounds,
         "clicking_rounds": lobby.clicking_rounds,
         "spacebar_rounds": lobby.spacebar_rounds,
         "round_duration": lobby.round_duration,
         "player_count": player_count,
-        "viewer_count": viewer_count,
+        "bidder_count": bidder_count,
     }
 
     if role:
@@ -481,8 +721,8 @@ def lobby_room(code):
     return f"lobby:{code}"
 
 
-def viewer_room(code):
-    return f"lobby:{code}:viewers"
+def bidder_room(code):
+    return f"lobby:{code}:bidders"
 
 
 def live_progress_payload(lobby, session, control):
@@ -516,7 +756,7 @@ def broadcast_live_progress(lobby, session, control):
     socketio.emit(
         "game:progress",
         live_progress_payload(lobby, session, control),
-        room=viewer_room(lobby.code),
+        room=bidder_room(lobby.code),
     )
 
 
@@ -598,13 +838,13 @@ def handle_connect():
         return False
 
     join_room(lobby_room(lobby.code))
-    if role == "viewer":
-        join_room(viewer_room(lobby.code))
+    if role == "bidder":
+        join_room(bidder_room(lobby.code))
     emit("lobby:updated", lobby_payload(lobby, include_members=True))
     game = game_payload(lobby)
     if game:
         emit("game:state", game)
-        if role == "viewer":
+        if role == "bidder":
             session = GameSession.query.filter_by(lobby_id=lobby.id).first()
             control = game_control(session)
             emit("game:progress", live_progress_payload(lobby, session, control))
@@ -633,7 +873,7 @@ def handle_game_progress(data):
 
 def tick_active_games():
     controls = GameControl.query.filter(
-        GameControl.phase.in_(["countdown", "running"])
+        GameControl.phase.in_(["instructions", "betting", "countdown", "running", "settling"])
     ).all()
     for control in controls:
         session = db.session.get(GameSession, control.game_session_id)
@@ -677,8 +917,12 @@ def start_game_tick_loop():
 def create_lobby():
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()
+    lobby_limit = data.get("lobby_limit")
     player_limit = data.get("player_limit")
-    viewer_limit = data.get("viewer_limit")
+    bidder_limit = data.get(
+        "bidder_limit",
+        data.get("gambler_limit", data.get("viewer_limit")),
+    )
     typing_rounds = data.get("typing_rounds", 1)
     clicking_rounds = data.get("clicking_rounds", 1)
     spacebar_rounds = data.get("spacebar_rounds", 1)
@@ -689,7 +933,12 @@ def create_lobby():
 
     try:
         player_limit = int(player_limit)
-        viewer_limit = int(viewer_limit)
+        bidder_limit = int(bidder_limit)
+        lobby_limit = (
+            min(100, player_limit + bidder_limit)
+            if lobby_limit is None
+            else int(lobby_limit)
+        )
         typing_rounds = int(typing_rounds)
         clicking_rounds = int(clicking_rounds)
         spacebar_rounds = int(spacebar_rounds)
@@ -697,11 +946,14 @@ def create_lobby():
     except (TypeError, ValueError):
         return jsonify({"message": "Lobby settings must be whole numbers."}), 400
 
-    if player_limit < 2 or player_limit > 12:
-        return jsonify({"message": "Player size must be between 2 and 12."}), 400
+    if lobby_limit < 1 or lobby_limit > 100:
+        return jsonify({"message": "Lobby size must be between 1 and 100."}), 400
 
-    if viewer_limit < 0 or viewer_limit > 100:
-        return jsonify({"message": "Viewer size must be between 0 and 100."}), 400
+    if player_limit < 1 or player_limit > 100:
+        return jsonify({"message": "Player size must be between 1 and 100."}), 400
+
+    if bidder_limit < 0 or bidder_limit > 50:
+        return jsonify({"message": "Bidder size must be between 0 and 50."}), 400
 
     round_counts = (typing_rounds, clicking_rounds, spacebar_rounds)
     if any(count < 1 or count > 10 for count in round_counts):
@@ -719,8 +971,9 @@ def create_lobby():
         code=code,
         name=name,
         host_user_id=user_id,
+        lobby_limit=lobby_limit,
         player_limit=player_limit,
-        viewer_limit=viewer_limit,
+        bidder_limit=bidder_limit,
         typing_rounds=typing_rounds,
         clicking_rounds=clicking_rounds,
         spacebar_rounds=spacebar_rounds,
@@ -780,18 +1033,18 @@ def join_lobby(code):
         return jsonify(lobby_payload(lobby, response_role, include_members=True))
 
     player_count = Player.query.filter_by(lobby_id=lobby.id).count()
-    viewer_count = Viewer.query.filter_by(lobby_id=lobby.id).count()
+    bidder_count = Bidder.query.filter_by(lobby_id=lobby.id).count()
+    member_count = player_count + bidder_count
     game_started = GameSession.query.filter_by(lobby_id=lobby.id).first() is not None
-    available_roles = []
+    if member_count >= lobby.lobby_limit:
+        return jsonify({"message": "This lobby has no open spots."}), 409
     if not game_started and player_count < lobby.player_limit:
-        available_roles.append("player")
-    if lobby.viewer_limit > 0 and viewer_count < lobby.viewer_limit:
-        available_roles.append("viewer")
-
-    if not available_roles:
+        response_role = "player"
+    elif lobby.bidder_limit > 0 and bidder_count < lobby.bidder_limit:
+        response_role = "bidder"
+    else:
         return jsonify({"message": "This lobby has no open spots."}), 409
 
-    response_role = random.choice(available_roles)
     if response_role == "player":
 
         db.session.add(
@@ -803,7 +1056,7 @@ def join_lobby(code):
         )
     else:
         db.session.add(
-            Viewer(
+            Bidder(
                 user_id=user_id,
                 lobby_id=lobby.id,
             )
@@ -819,12 +1072,13 @@ def delete_lobby_data(lobby):
     if session:
         for key in [key for key in LIVE_PROGRESS if key[0] == session.id]:
             LIVE_PROGRESS.pop(key, None)
+        Bet.query.filter_by(game_session_id=session.id).delete()
         GameControl.query.filter_by(game_session_id=session.id).delete()
         GameResult.query.filter_by(game_session_id=session.id).delete()
         db.session.delete(session)
 
     Player.query.filter_by(lobby_id=lobby.id).delete()
-    Viewer.query.filter_by(lobby_id=lobby.id).delete()
+    Bidder.query.filter_by(lobby_id=lobby.id).delete()
     db.session.delete(lobby)
 
 
@@ -849,9 +1103,10 @@ def admin_lobby_rows():
             "host_username": lobby.host.username,
             "host_name": display_name_for(lobby.host),
             "player_count": Player.query.filter_by(lobby_id=lobby.id).count(),
+            "lobby_limit": lobby.lobby_limit,
             "player_limit": lobby.player_limit,
-            "viewer_count": Viewer.query.filter_by(lobby_id=lobby.id).count(),
-            "viewer_limit": lobby.viewer_limit,
+            "bidder_count": Bidder.query.filter_by(lobby_id=lobby.id).count(),
+            "bidder_limit": lobby.bidder_limit,
         }
         for lobby in Lobby.query.order_by(Lobby.created_at.desc()).all()
     ]
@@ -906,7 +1161,7 @@ def admin_update_user_profile(target_user_id):
         membership.lobby_id
         for membership in [
             *Player.query.filter_by(user_id=user.id).all(),
-            *Viewer.query.filter_by(user_id=user.id).all(),
+            *Bidder.query.filter_by(user_id=user.id).all(),
         ]
     }
     for lobby_id in lobby_ids:
@@ -955,15 +1210,15 @@ def leave_lobby(code):
 
     user_id = int(get_jwt_identity())
     player = Player.query.filter_by(lobby_id=lobby.id, user_id=user_id).first()
-    viewer = Viewer.query.filter_by(lobby_id=lobby.id, user_id=user_id).first()
-    if not player and not viewer:
+    bidder = Bidder.query.filter_by(lobby_id=lobby.id, user_id=user_id).first()
+    if not player and not bidder:
         return jsonify({"message": "You are not in this lobby."}), 404
 
     was_host = lobby.host_user_id == user_id
     if player:
         db.session.delete(player)
-    if viewer:
-        db.session.delete(viewer)
+    if bidder:
+        db.session.delete(bidder)
     db.session.flush()
 
     next_host = None
@@ -973,17 +1228,14 @@ def leave_lobby(code):
             next_host = random.choice(remaining_players)
             lobby.host_user_id = next_host.user_id
         else:
-            remaining_viewers = Viewer.query.filter_by(lobby_id=lobby.id).all()
-            if remaining_viewers:
-                promoted = random.choice(remaining_viewers)
-                next_host = Player(user_id=promoted.user_id, lobby_id=lobby.id, score=0)
-                db.session.delete(promoted)
-                db.session.add(next_host)
+            remaining_bidders = Bidder.query.filter_by(lobby_id=lobby.id).all()
+            if remaining_bidders:
+                next_host = random.choice(remaining_bidders)
                 lobby.host_user_id = next_host.user_id
 
     has_players = Player.query.filter_by(lobby_id=lobby.id).count() > 0
-    has_viewers = Viewer.query.filter_by(lobby_id=lobby.id).count() > 0
-    if not has_players and not has_viewers:
+    has_bidders = Bidder.query.filter_by(lobby_id=lobby.id).count() > 0
+    if not has_players and not has_bidders:
         lobby_code = lobby.code
         delete_lobby_data(lobby)
         db.session.commit()
@@ -1039,7 +1291,7 @@ def start_lobby_game(code):
 
     session = GameSession(
         lobby_id=lobby.id,
-        started_at=utc_now() + timedelta(seconds=START_COUNTDOWN_DURATION),
+        started_at=utc_now() + timedelta(seconds=INSTRUCTION_DURATION),
         typing_prompt=pick_prompt(),
     )
     db.session.add(session)
@@ -1047,8 +1299,9 @@ def start_lobby_game(code):
     db.session.add(GameControl(
         game_session_id=session.id,
         round_index=0,
-        phase="countdown",
+        phase="instructions",
         round_started_at=session.started_at,
+        betting_settled=False,
     ))
     db.session.commit()
     broadcast_lobby(lobby)
@@ -1080,9 +1333,7 @@ def start_next_round(code):
     if control.round_index >= len(game_order) - 1:
         control.phase = "finished"
     else:
-        control.round_index += 1
-        control.phase = "countdown"
-        control.round_started_at = utc_now() + timedelta(seconds=START_COUNTDOWN_DURATION)
+        start_betting_phase(lobby, control, control.round_index + 1)
 
     db.session.commit()
     broadcast_game(lobby, session)
@@ -1106,6 +1357,68 @@ def get_lobby_game(code):
     return jsonify(game)
 
 
+@app.post("/lobbies/<code>/game/bets")
+@jwt_required()
+def place_game_bet(code):
+    lobby = find_lobby(code)
+    if not lobby:
+        return jsonify({"message": "Lobby not found."}), 404
+
+    user_id = int(get_jwt_identity())
+    bidder = Bidder.query.filter_by(lobby_id=lobby.id, user_id=user_id).first()
+    if not bidder:
+        return jsonify({"message": "Only bidders can place bets."}), 403
+
+    session = GameSession.query.filter_by(lobby_id=lobby.id).first()
+    if not session:
+        return jsonify({"message": "The game has not started."}), 409
+
+    control = game_control(session)
+    sync_game_control(lobby, session, control)
+    if control.phase != "betting":
+        return jsonify({"message": "Betting is closed for this round."}), 409
+
+    data = request.get_json(silent=True) or {}
+    try:
+        player_user_id = int(data.get("player_user_id"))
+        amount = Decimal(str(data.get("amount")))
+        if not amount.is_finite() or amount <= 0 or amount.as_tuple().exponent < -2:
+            raise ValueError
+        amount_cents = int(amount * 100)
+    except (InvalidOperation, TypeError, ValueError):
+        return jsonify({"message": "Enter a positive bet with no more than two decimal places."}), 400
+
+    player = Player.query.filter_by(lobby_id=lobby.id, user_id=player_user_id).first()
+    if not player:
+        return jsonify({"message": "Choose a current player."}), 400
+    if amount_cents > bidder.balance_cents:
+        return jsonify({"message": "Your bet exceeds your available balance."}), 400
+
+    existing = Bet.query.filter_by(
+        game_session_id=session.id,
+        bidder_user_id=user_id,
+        round_index=control.round_index,
+    ).first()
+    if existing:
+        return jsonify({"message": "You already placed a bet this round."}), 409
+
+    bidder.balance_cents -= amount_cents
+    db.session.add(Bet(
+        game_session_id=session.id,
+        bidder_user_id=user_id,
+        player_user_id=player_user_id,
+        round_index=control.round_index,
+        amount_cents=amount_cents,
+    ))
+    db.session.commit()
+    broadcast_game(lobby, session)
+    return jsonify({
+        "message": "Bet placed.",
+        "balance": bidder.balance_cents / 100,
+        "betting": betting_payload(lobby, session, control),
+    }), 201
+
+
 @app.post("/lobbies/<code>/game/progress")
 @jwt_required()
 def update_game_progress(code):
@@ -1123,7 +1436,7 @@ def update_game_progress(code):
 
     session, control = recorded
     payload = live_progress_payload(lobby, session, control)
-    socketio.emit("game:progress", payload, room=viewer_room(lobby.code))
+    socketio.emit("game:progress", payload, room=bidder_room(lobby.code))
     return jsonify(payload)
 
 
@@ -1158,7 +1471,7 @@ def submit_game_result(code):
         or submitted_round > state["round_index"]
         or (
             submitted_round == state["round_index"]
-            and state["phase"] not in ("running", "leaderboard")
+            and state["phase"] not in ("running", "settling", "leaderboard")
         )
     ):
         return jsonify({"message": "That round is not accepting results."}), 409
@@ -1221,6 +1534,7 @@ def submit_game_result(code):
         and submitted_count >= player_count
     ):
         control.phase = "leaderboard"
+        settle_round_bets(lobby, session, control)
     db.session.commit()
     broadcast_game(lobby, session)
     return jsonify({"score": score, "metric": metric, "accuracy": accuracy}), 201

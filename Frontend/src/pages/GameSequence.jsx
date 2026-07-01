@@ -6,6 +6,8 @@ const TITLES = {
   spacebar: "Spacebar round",
 };
 
+const formatMoney = (value) => `$${Number(value || 0).toFixed(2)}`;
+
 const KEYBOARD_ROWS = [
   [
     ["Backquote", "`"], ["Digit1", "1"], ["Digit2", "2"], ["Digit3", "3"],
@@ -99,13 +101,18 @@ function SpectatorProgress({ game, liveProgress }) {
   );
 }
 
-function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress, user }) {
+function GameSequence({ code, game, isBidder, liveProgress, onLeave, onProgress, user }) {
+  const canBid = isBidder
+    || game.betting?.bidders?.some((bidder) => bidder.user_id === user.user_id);
   const [typed, setTyped] = useState("");
   const [count, setCount] = useState(0);
   const [activeKeys, setActiveKeys] = useState(() => new Set());
   const [completedRounds, setCompletedRounds] = useState(() => new Set());
   const [message, setMessage] = useState("");
   const [advancing, setAdvancing] = useState(false);
+  const [selectedPlayer, setSelectedPlayer] = useState("");
+  const [betAmount, setBetAmount] = useState("");
+  const [placingBet, setPlacingBet] = useState(false);
   const previousRound = useRef(game.round_index);
   const previousPhase = useRef(game.phase);
   const liveInput = useRef({ typed: "", count: 0 });
@@ -115,7 +122,7 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
   const lastProgressSent = useRef(0);
 
   const publishProgress = useCallback((progress) => {
-    if (isViewer) return;
+    if (canBid) return;
 
     queuedProgress.current = {
       round_index: game.round_index,
@@ -136,7 +143,7 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
     } else if (progressTimeout.current == null) {
       progressTimeout.current = window.setTimeout(send, delay);
     }
-  }, [game.game_type, game.round_index, isViewer, onProgress]);
+  }, [game.game_type, game.round_index, canBid, onProgress]);
 
   useEffect(() => () => {
     if (progressTimeout.current != null) {
@@ -145,7 +152,7 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
   }, []);
 
   const submitRound = useCallback(async (roundIndex, values) => {
-    if (isViewer || submittedRounds.current.has(roundIndex)) return;
+    if (canBid || submittedRounds.current.has(roundIndex)) return;
 
     submittedRounds.current.add(roundIndex);
     setCompletedRounds((current) => new Set(current).add(roundIndex));
@@ -179,11 +186,12 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
       });
       setMessage("Score submission failed. Check your connection.");
     }
-  }, [code, isViewer]);
+  }, [code, canBid]);
 
   useEffect(() => {
     const roundChanged = previousRound.current !== game.round_index;
-    const roundJustEnded = previousPhase.current === "running" && game.phase === "leaderboard";
+    const roundJustEnded = previousPhase.current === "running"
+      && ["settling", "leaderboard"].includes(game.phase);
 
     if (roundChanged) {
       submitRound(previousRound.current, liveInput.current);
@@ -199,7 +207,7 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
   }, [game.phase, game.round_index, submitRound]);
 
   useEffect(() => {
-    const typingActive = game.phase === "running" && game.game_type === "typing" && !isViewer;
+    const typingActive = game.phase === "running" && game.game_type === "typing" && !canBid;
 
     function pressKey(event) {
       setActiveKeys((current) => new Set(current).add(event.code));
@@ -264,10 +272,10 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
       window.removeEventListener("paste", blockPaste);
       window.removeEventListener("blur", clearKeys);
     };
-  }, [game.phase, game.game_type, game.prompt, game.round_index, isViewer, publishProgress, submitRound]);
+  }, [game.phase, game.game_type, game.prompt, game.round_index, canBid, publishProgress, submitRound]);
 
   useEffect(() => {
-    if (game.phase !== "running" || game.game_type !== "spacebar" || isViewer) return undefined;
+    if (game.phase !== "running" || game.game_type !== "spacebar" || canBid) return undefined;
     function handleSpacebar(event) {
       if ((event.code === "Space" || event.key === " ") && !event.repeat) {
         event.preventDefault();
@@ -278,13 +286,39 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
     }
     window.addEventListener("keydown", handleSpacebar);
     return () => window.removeEventListener("keydown", handleSpacebar);
-  }, [game.phase, game.game_type, isViewer, publishProgress]);
+  }, [game.phase, game.game_type, canBid, publishProgress]);
 
   function registerClick() {
-    if (game.phase !== "running" || isViewer) return;
+    if (game.phase !== "running" || canBid) return;
     liveInput.current.count += 1;
     setCount(liveInput.current.count);
     publishProgress({ count: liveInput.current.count });
+  }
+
+  async function placeBet(event) {
+    event.preventDefault();
+    setPlacingBet(true);
+    setMessage("");
+    try {
+      const response = await fetch(`/lobbies/${code}/game/bets`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          player_user_id: Number(selectedPlayer),
+          amount: betAmount,
+        }),
+      });
+      const data = await response.json();
+      setMessage(data.message || (response.ok ? "Bet placed." : "Could not place bet."));
+      if (response.ok) {
+        setBetAmount("");
+      }
+    } catch {
+      setMessage("Could not connect to the server.");
+    } finally {
+      setPlacingBet(false);
+    }
   }
 
   async function advanceRound() {
@@ -307,12 +341,132 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
     }
   }
 
+  if (game.phase === "instructions") {
+    return (
+      <main className="game-stage instruction-stage page-enter">
+        <header className="game-header">
+          <div>
+            <p className="eyebrow">How to play</p>
+            <h1>{canBid ? "Bidder instructions" : "Player instructions"}</h1>
+          </div>
+          <div className="game-timer">{game.seconds_remaining}</div>
+          <button className="danger-button" type="button" onClick={onLeave}>Leave</button>
+        </header>
+
+        {canBid ? (
+          <section className="instruction-panel">
+            <p className="instruction-intro">You begin with $1,000 and bid on who will finish first each round.</p>
+            <ol>
+              <li>During the 15-second bidding window, select one player and enter any amount within your balance.</li>
+              <li>Your bid locks immediately. If your player wins, correct bidders split the full pot equally.</li>
+              <li>Watch the race live. Your updated balance and bidding winners appear after the round.</li>
+              <li>If your balance reaches $0, you receive $50 when the next round begins.</li>
+            </ol>
+          </section>
+        ) : (
+          <section className="instruction-panel">
+            <p className="instruction-intro">Complete each challenge before time expires. Faster, accurate play earns a higher round score.</p>
+            <ol>
+              <li>Typing: type the displayed passage exactly. Use Backspace to fix mistakes; pasting is disabled.</li>
+              <li>Clicking: click the large target as many times as possible.</li>
+              <li>Spacebar: press the spacebar as many times as possible.</li>
+              <li>Your result submits automatically. The highest round score determines first place for bidders.</li>
+            </ol>
+          </section>
+        )}
+        <p className="instruction-footer">The first bidding window opens when this timer reaches zero.</p>
+      </main>
+    );
+  }
+
+  if (game.phase === "betting") {
+    const bidder = game.betting?.bidders?.find((entry) => entry.user_id === user.user_id);
+    const alreadyBet = game.betting?.bettor_ids?.includes(user.user_id);
+    return (
+      <main className="game-stage betting-stage page-enter">
+        <header className="game-header">
+          <div>
+            <p className="eyebrow">Round {game.round_index + 1} betting</p>
+            <h1>Pick the first-place player</h1>
+          </div>
+          <div className="game-timer">{game.seconds_remaining}</div>
+          <button className="danger-button" type="button" onClick={onLeave}>Leave</button>
+        </header>
+
+        {canBid ? (
+          <form className="betting-panel" onSubmit={placeBet}>
+            <div className="betting-balance">
+              <span>Available balance</span>
+              <strong>{formatMoney(bidder?.balance)}</strong>
+            </div>
+            {alreadyBet ? (
+              <p className="bet-locked">Your bet is locked in for this round.</p>
+            ) : (
+              <>
+                <span className="betting-field-label">Choose a player</span>
+                <div className="bet-player-grid">
+                  {(game.players || []).map((player) => (
+                    <label
+                      className={`bet-player-card${String(player.user_id) === selectedPlayer ? " selected" : ""}`}
+                      key={player.user_id}
+                    >
+                      <input
+                        type="radio"
+                        name="bet-player"
+                        value={player.user_id}
+                        checked={String(player.user_id) === selectedPlayer}
+                        onChange={(event) => setSelectedPlayer(event.target.value)}
+                        required
+                      />
+                      <span>{player.name}</span>
+                    </label>
+                  ))}
+                </div>
+                <label htmlFor="bet-amount">Bet amount</label>
+                <input
+                  id="bet-amount"
+                  type="number"
+                  min="0.01"
+                  max={bidder?.balance || 0}
+                  step="0.01"
+                  value={betAmount}
+                  onChange={(event) => setBetAmount(event.target.value)}
+                  placeholder="0.00"
+                  required
+                />
+                <button className="login-button" type="submit" disabled={placingBet || !selectedPlayer}>
+                  {placingBet ? "Placing bet..." : "Place bet"}
+                </button>
+              </>
+            )}
+            <p className="form-message" role="status">{message}</p>
+          </form>
+        ) : (
+          <section className="betting-panel betting-wait">
+            <p className="status-kicker">Betting window open</p>
+            <h2>Bidders are placing their bets.</h2>
+            <p>The round countdown begins when betting closes.</p>
+          </section>
+        )}
+      </main>
+    );
+  }
+
   if (game.phase === "countdown") {
     return (
       <main className="game-stage transition-screen page-enter">
         <p className="eyebrow">{TITLES[game.game_type]} begins in</p>
         <div className="countdown-number" key={game.seconds_remaining}>{game.seconds_remaining}</div>
         <h1>Get ready</h1>
+      </main>
+    );
+  }
+
+  if (game.phase === "settling") {
+    return (
+      <main className="game-stage transition-screen page-enter">
+        <p className="eyebrow">Round complete</p>
+        <h1>Finalizing results</h1>
       </main>
     );
   }
@@ -340,6 +494,28 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
             );
           })}
         </div>
+        <section className="betting-results">
+          <p className="status-kicker">Betting results</p>
+          <h2>Round pot: {formatMoney(game.betting?.pot)}</h2>
+          <p>
+            First place: {(game.betting?.winning_players || []).map((player) => player.name).join(", ") || "No result"}
+          </p>
+          {(game.betting?.winners || []).length > 0 ? (
+            <div className="betting-winner-list">
+              {game.betting.winners.map((winner) => (
+                <p key={winner.user_id}>
+                  <strong>{winner.name}</strong> won {formatMoney(winner.payout)} betting on {winner.player_name}.
+                </p>
+              ))}
+            </div>
+          ) : (
+            <p>
+              {(game.betting?.bettor_ids || []).length === 0
+                ? "No bets were placed this round."
+                : "No bidder picked the first-place player."}
+            </p>
+          )}
+        </section>
         {isHost ? (
           <button className="login-button next-round-button" type="button" disabled={advancing} onClick={advanceRound}>
             {game.next_game_type ? `Start ${TITLES[game.next_game_type]}` : "Show final results"}
@@ -358,14 +534,33 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
       <main className="results-page page-enter">
         <p className="eyebrow">Race complete</p>
         <h1>Final results</h1>
-        <div className="results-list">
-          {(game.standings || []).map((standing, index) => (
-            <div className="result-row" key={standing.user_id}>
-              <span>#{index + 1}</span>
-              <strong>{standing.name}{standing.user_id === user.user_id ? " (You)" : ""}</strong>
-              <b>{standing.score} pts</b>
+        <div className="final-scoreboards">
+          <section className="final-scoreboard">
+            <p className="status-kicker">Players</p>
+            <h2>Top scoring players</h2>
+            <div className="results-list">
+              {(game.standings || []).map((standing, index) => (
+                <div className="result-row" key={standing.user_id}>
+                  <span>#{index + 1}</span>
+                  <strong>{standing.name}{standing.user_id === user.user_id ? " (You)" : ""}</strong>
+                  <b>{standing.score} pts</b>
+                </div>
+              ))}
             </div>
-          ))}
+          </section>
+          <section className="final-scoreboard">
+            <p className="status-kicker">Bidders</p>
+            <h2>Top scoring bidders</h2>
+            <div className="results-list">
+              {(game.bidder_standings || []).map((bidder, index) => (
+                <div className="result-row" key={bidder.user_id}>
+                  <span>#{index + 1}</span>
+                  <strong>{bidder.name}{bidder.user_id === user.user_id ? " (You)" : ""}</strong>
+                  <b>{formatMoney(bidder.balance)}</b>
+                </div>
+              ))}
+            </div>
+          </section>
         </div>
         <button className="danger-button" type="button" onClick={onLeave}>Leave lobby</button>
       </main>
@@ -375,7 +570,7 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
   const typingComplete = completedRounds.has(game.round_index);
 
   return (
-    <main className={`game-stage page-enter${isViewer ? " spectator-stage" : ""}`}>
+    <main className={`game-stage page-enter${canBid ? " spectator-stage" : ""}`}>
       <header className="game-header">
         <div>
           <p className="eyebrow">Round {game.round_index + 1} of {game.game_order?.length || 3}</p>
@@ -385,11 +580,11 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
         <button className="danger-button" type="button" onClick={onLeave}>Leave</button>
       </header>
 
-      {isViewer && <p className="spectator-banner">Spectating — player progress updates live.</p>}
+      {canBid && <p className="spectator-banner">Bidding — player progress updates live.</p>}
 
-      {isViewer && <SpectatorProgress game={game} liveProgress={liveProgress} />}
+      {canBid && <SpectatorProgress game={game} liveProgress={liveProgress} />}
 
-      {!isViewer && game.game_type === "typing" && (
+      {!canBid && game.game_type === "typing" && (
         <section className="typing-board integrated-typing" aria-label="Typing passage">
           <div className="typing-overlay" aria-live="polite">
             {game.prompt?.split("").map((character, index) => {
@@ -404,7 +599,7 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
             })}
           </div>
           <p className={`typing-status ${typingComplete ? "complete" : ""}`}>
-            {isViewer
+            {canBid
               ? "Watching the typing round"
               : typingComplete
                 ? "Passage complete — score submitted."
@@ -414,20 +609,20 @@ function GameSequence({ code, game, isViewer, liveProgress, onLeave, onProgress,
         </section>
       )}
 
-      {!isViewer && game.game_type === "clicking" && (
+      {!canBid && game.game_type === "clicking" && (
         <section className="action-board">
           <div className="action-count">{count}</div>
-          <button className="click-target" type="button" disabled={isViewer} onClick={registerClick}>
-            {isViewer ? "Spectating" : "Click me"}
+          <button className="click-target" type="button" disabled={canBid} onClick={registerClick}>
+            {canBid ? "Bidding" : "Click me"}
           </button>
         </section>
       )}
 
-      {!isViewer && game.game_type === "spacebar" && (
+      {!canBid && game.game_type === "spacebar" && (
         <section className="action-board">
           <div className="action-count">{count}</div>
           <div className={`spacebar-key ${activeKeys.has("Space") ? "active" : ""}`}>Spacebar</div>
-          <p>{isViewer ? "Spectating" : "Press the spacebar as fast as possible"}</p>
+          <p>{canBid ? "Bidding" : "Press the spacebar as fast as possible"}</p>
         </section>
       )}
       <p className="form-message" role="status">{message}</p>

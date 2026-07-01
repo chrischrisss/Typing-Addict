@@ -187,7 +187,10 @@ function AdminDashboard({ handleLogout, user }) {
                   <strong>{lobby.name}</strong>
                   <small>{lobby.code} · Hosted by {lobby.host_name} (@{lobby.host_username})</small>
                 </div>
-                <span>{lobby.player_count} / {lobby.player_limit} players</span>
+                <span>
+                  {lobby.player_count + lobby.bidder_count} / {lobby.lobby_limit} total ·{" "}
+                  {lobby.player_count} players · {lobby.bidder_count} bidders
+                </span>
                 <button type="button" onClick={() => closeLobby(lobby)}>Close</button>
               </div>
             )) : (
