@@ -3,6 +3,7 @@ import GameSequence from "./GameSequence";
 import { useLobbySocket } from "../hooks/useLobbySocket";
 
 const GAME_STATE_INTERVAL_MS = 1000;
+const BIDDER_GAME_STATE_INTERVAL_MS = 100;
 const PROGRESS_TRAIL_INTERVAL_MS = 5000;
 
 function WaitingRoom({ lobby: initialLobby, onExit, user }) {
@@ -12,6 +13,8 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
   const [exiting, setExiting] = useState(false);
   const [liveProgress, setLiveProgress] = useState(null);
   const progressTrailUpdate = useRef({ roundIndex: null, updatedAt: 0 });
+  const isBidderView = lobby.role === "bidder"
+    || lobby.bidders?.some((bidder) => bidder.user_id === user.user_id);
 
   const updateProgressTrail = useCallback((progress) => {
     if (!progress) {
@@ -63,12 +66,21 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
 
     pollGameState();
     // Keep timers and phase transitions smooth even while Socket.IO reconnects.
-    const intervalId = window.setInterval(pollGameState, GAME_STATE_INTERVAL_MS);
+    const intervalId = window.setInterval(
+      pollGameState,
+      isBidderView ? BIDDER_GAME_STATE_INTERVAL_MS : GAME_STATE_INTERVAL_MS,
+    );
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [lobby.code, lobby.game?.phase, lobby.game?.round_index, updateProgressTrail]);
+  }, [
+    isBidderView,
+    lobby.code,
+    lobby.game?.phase,
+    lobby.game?.round_index,
+    updateProgressTrail,
+  ]);
 
   useLobbySocket(lobby.code, {
     onLobbyUpdated: (data) => {
@@ -172,10 +184,7 @@ function WaitingRoom({ lobby: initialLobby, onExit, user }) {
       <GameSequence
         code={lobby.code}
         game={lobby.game}
-        isBidder={
-          lobby.role === "bidder"
-          || lobby.bidders?.some((bidder) => bidder.user_id === user.user_id)
-        }
+        isBidder={isBidderView}
         liveProgress={liveProgress}
         onLeave={leaveLobby}
         onProgress={sendGameProgress}
